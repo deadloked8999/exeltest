@@ -6,6 +6,7 @@ from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 import logging
 from typing import List, Dict, Any, Optional
+from datetime import date
 import hashlib
 from collections import defaultdict
 
@@ -54,7 +55,8 @@ class Database:
             raise
     
     def save_uploaded_file(self, user_id: int, username: str, file_name: str, 
-                          file_content: bytes, row_count: int) -> int:
+                          file_content: bytes, row_count: int,
+                          report_date: Optional[date] = None) -> int:
         """Сохранение информации о загруженном файле"""
         file_hash = hashlib.sha256(file_content).hexdigest()
         
@@ -62,11 +64,11 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO uploaded_files (user_id, username, file_name, file_hash, row_count)
-                    VALUES (%s, %s, %s, %s, %s)
+                    INSERT INTO uploaded_files (user_id, username, file_name, file_hash, row_count, report_date, file_content)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (user_id, username, file_name, file_hash, row_count)
+                    (user_id, username, file_name, file_hash, row_count, report_date, file_content)
                 )
                 file_id = cur.fetchone()[0]
                 logger.info(f"File saved with ID: {file_id}")
@@ -167,6 +169,395 @@ class Database:
                 deleted = cur.fetchall()
                 return len(deleted)
 
+    def save_income_records(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Доходы»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                # Удаляем ранее сохранённые данные для файла, чтобы не дублировать строки
+                cur.execute(
+                    "DELETE FROM income_records WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO income_records (file_id, category, amount)
+                    VALUES (%s, %s, %s)
+                    """,
+                    [
+                        (file_id, rec.get('category'), rec.get('amount'))
+                        for rec in records
+                    ]
+                )
+
+    def list_income_records(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Доходы» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT category, amount, created_at
+                    FROM income_records
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_ticket_sales(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Входные билеты»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM ticket_sales WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO ticket_sales (file_id, price_label, price_value, quantity, amount, is_total)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('price_label'),
+                            rec.get('price_value'),
+                            rec.get('quantity'),
+                            rec.get('amount'),
+                            rec.get('is_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_ticket_sales(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Входные билеты» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT price_label, price_value, quantity, amount, is_total, created_at
+                    FROM ticket_sales
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_payment_types(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Типы оплат за смену»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM payment_types WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO payment_types (file_id, payment_type, amount, is_total, is_cash_total)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('payment_type'),
+                            rec.get('amount'),
+                            rec.get('is_total', False),
+                            rec.get('is_cash_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_payment_types(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Типы оплат за смену» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT payment_type, amount, is_total, is_cash_total, created_at
+                    FROM payment_types
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_staff_statistics(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Статистика персонала»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM staff_statistics WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO staff_statistics (file_id, role_name, staff_count)
+                    VALUES (%s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('role_name'),
+                            rec.get('staff_count')
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_staff_statistics(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Статистика персонала» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT role_name, staff_count, created_at
+                    FROM staff_statistics
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_expense_records(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Расходы»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM expense_records WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO expense_records (file_id, expense_item, amount, is_total)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('expense_item'),
+                            rec.get('amount'),
+                            rec.get('is_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_expense_records(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Расходы» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT expense_item, amount, is_total, created_at
+                    FROM expense_records
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_cash_collection(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Инкассация»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM cash_collection WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO cash_collection (file_id, currency_label, quantity, exchange_rate, amount, is_total)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('currency_label'),
+                            rec.get('quantity'),
+                            rec.get('exchange_rate'),
+                            rec.get('amount'),
+                            rec.get('is_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_cash_collection(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Инкассация» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT currency_label, quantity, exchange_rate, amount, is_total, created_at
+                    FROM cash_collection
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_staff_debts(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Долги по персоналу»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM staff_debts WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO staff_debts (file_id, debt_type, amount, is_total)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('debt_type'),
+                            rec.get('amount'),
+                            rec.get('is_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_staff_debts(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Долги по персоналу» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT debt_type, amount, is_total, created_at
+                    FROM staff_debts
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_notes_entries(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Примечание»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM notes_entries WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO notes_entries (file_id, category, entry_text, is_total, amount)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('category'),
+                            rec.get('entry_text'),
+                            rec.get('is_total', False),
+                            rec.get('amount')
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_notes_entries(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Примечание» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT category, entry_text, is_total, amount, created_at
+                    FROM notes_entries
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    def save_totals_summary(self, file_id: int, rows: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Итого»"""
+        if not rows:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM totals_summary WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO totals_summary (file_id, payment_type, income_amount, expense_amount, net_profit)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            row.get('payment_type'),
+                            row.get('income_amount'),
+                            row.get('expense_amount'),
+                            row.get('net_profit')
+                        )
+                        for row in rows
+                    ]
+                )
+
+    def list_totals_summary(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Итого» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT payment_type, income_amount, expense_amount, net_profit, created_at
+                    FROM totals_summary
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
     def clear_uploaded_files(self) -> int:
         """Полная очистка загруженных файлов и связанных данных"""
         with self.get_connection() as conn:
@@ -244,7 +635,7 @@ class Database:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT id, file_name, upload_date, row_count
+                    SELECT id, file_name, upload_date, row_count, report_date
                     FROM uploaded_files
                     ORDER BY upload_date DESC
                     LIMIT %s
@@ -259,11 +650,53 @@ class Database:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT id, file_name, upload_date, row_count
+                    SELECT id, file_name, upload_date, row_count, report_date
                     FROM uploaded_files
                     ORDER BY upload_date DESC
                     LIMIT 1
                     """
+                )
+                result = cur.fetchone()
+                return dict(result) if result else None
+
+    def set_uploaded_file_report_date(self, file_id: int, report_date: date) -> None:
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE uploaded_files
+                    SET report_date = %s
+                    WHERE id = %s
+                    """,
+                    (report_date, file_id)
+                )
+
+    def get_report_dates(self) -> List[date]:
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT report_date
+                    FROM uploaded_files
+                    WHERE report_date IS NOT NULL
+                    ORDER BY report_date DESC
+                    """
+                )
+                rows = cur.fetchall()
+                return [row[0] for row in rows if row[0] is not None]
+
+    def get_file_by_report_date(self, report_date: date) -> Optional[Dict[str, Any]]:
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM uploaded_files
+                    WHERE report_date = %s
+                    ORDER BY upload_date DESC
+                    LIMIT 1
+                    """,
+                    (report_date,)
                 )
                 result = cur.fetchone()
                 return dict(result) if result else None
