@@ -327,7 +327,7 @@ async def send_employees_menu_message(target_message):
 
 async def generate_income_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по доходам за период"""
-    from collections import defaultdict, OrderedDict
+    from collections import defaultdict
     
     # Получаем все файлы за период
     files = db.get_files_by_period(start_date, end_date, club_name)
@@ -337,35 +337,47 @@ async def generate_income_period_report(club_name: str, start_date: date, end_da
     
     # Словарь для суммирования: {категория: сумма}
     income_summary = defaultdict(Decimal)
-    # Список для сохранения порядка категорий (из первого файла)
+    # Список для сохранения порядка категорий (берем из первого файла который имеет максимум категорий)
     category_order = []
-    first_file = True
     
-    # Проходим по каждому файлу и суммируем доходы
+    # ШАГ 1: Собираем ВСЕ уникальные категории из ВСЕХ файлов периода и запоминаем порядок
+    all_categories_by_file = []
     for file_info in files:
         file_id = file_info['id']
         records = db.list_income_records(file_id)
         
+        file_categories = []
         for rec in records:
             category = rec['category']
             amount = rec['amount']
             
-            # Запоминаем порядок категорий из первого файла
-            if first_file and category not in category_order:
-                category_order.append(category)
-            
+            # Суммируем
             income_summary[category] += amount
+            
+            # Запоминаем порядок для этого файла
+            if category not in file_categories:
+                file_categories.append(category)
         
-        first_file = False
+        all_categories_by_file.append(file_categories)
     
-    # Формируем список для вывода В ПРАВИЛЬНОМ ПОРЯДКЕ (как в исходном файле)
+    # ШАГ 2: Выбираем порядок из файла, у которого больше всего категорий (наиболее полный)
+    if all_categories_by_file:
+        category_order = max(all_categories_by_file, key=len)
+    
+    # ШАГ 3: Добавляем категории, которые есть в других файлах, но нет в category_order
+    for file_cats in all_categories_by_file:
+        for cat in file_cats:
+            if cat not in category_order:
+                category_order.append(cat)
+    
+    # ШАГ 4: Формируем список для вывода В ПРАВИЛЬНОМ ПОРЯДКЕ
+    # ВАЖНО: Показываем ВСЕ категории, даже если сумма = 0!
     display_rows = []
     for category in category_order:
-        if category in income_summary:
-            display_rows.append({
-                'Категория': category,
-                'Сумма за период': decimal_to_float(income_summary[category])
-            })
+        display_rows.append({
+            'Категория': category,
+            'Сумма за период': decimal_to_float(income_summary.get(category, Decimal('0')))
+        })
     
     return display_rows
 

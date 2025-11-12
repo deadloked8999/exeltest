@@ -892,6 +892,19 @@ class Database:
                 
                 return schema_description
     
+    def get_all_files(self) -> List[Dict[str, Any]]:
+        """Получение всех файлов"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, file_name, upload_date, row_count, report_date, club_name
+                    FROM uploaded_files
+                    ORDER BY report_date DESC, upload_date DESC
+                    """
+                )
+                return [dict(row) for row in cur.fetchall()]
+
     def get_user_files(self, user_id: int) -> List[Dict[str, Any]]:
         """Получение списка файлов пользователя"""
         with self.get_connection() as conn:
