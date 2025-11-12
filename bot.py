@@ -140,12 +140,23 @@ def get_employees_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_club_selection_keyboard() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("🏢 Москвич", callback_data="select_club|Москвич")],
+        [InlineKeyboardButton("🌟 Анора", callback_data="select_club|Анора")],
+        [InlineKeyboardButton("📊 Оба клуба", callback_data="select_club|Оба")],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 def get_query_dates_keyboard(dates: List[date]) -> InlineKeyboardMarkup:
     keyboard = []
     for dt in dates:
         label = format_report_date(dt)
         callback_data = f"query_date|{dt.isoformat()}"
         keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+    keyboard.append([InlineKeyboardButton("⬅️ К выбору клуба", callback_data="main_queries")])
     keyboard.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -155,7 +166,7 @@ def get_blocks_keyboard(report_date: date) -> InlineKeyboardMarkup:
     for block_id, block_label in QUERY_BLOCKS:
         callback_data = f"query_block|{report_date.isoformat()}|{block_id}"
         keyboard.append([InlineKeyboardButton(block_label, callback_data=callback_data)])
-    keyboard.append([InlineKeyboardButton("⬅️ К выбору даты", callback_data="main_queries")])
+    keyboard.append([InlineKeyboardButton("⬅️ К выбору клуба", callback_data="main_queries")])
     keyboard.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
@@ -261,20 +272,26 @@ async def send_employees_menu_message(target_message):
 
 
 async def send_queries_menu_message(target_message, context=None):
-    await send_report_dates_menu(target_message, context)
+    # Сначала предлагаем выбрать клуб
+    await target_message.reply_text(
+        "📊 Выберите клуб для просмотра отчётов:",
+        reply_markup=get_club_selection_keyboard()
+    )
 
 
 async def send_report_dates_menu(target_message, context=None):
     club_name = context.user_data.get('current_club') if context else None
     dates = db.get_report_dates(club_name=club_name)
     if not dates:
+        club_text = f" для клуба {club_name}" if club_name and club_name != 'Оба' else ""
         await target_message.reply_text(
-            "📭 Пока нет отчётов с установленной датой. Загрузите файл и укажите дату."
+            f"📭 Пока нет отчётов{club_text} с установленной датой. Загрузите файл и укажите дату."
         )
         return
 
+    club_text = f" ({club_name})" if club_name else ""
     await target_message.reply_text(
-        "Выберите дату отчёта:",
+        f"📅 Выберите дату отчёта{club_text}:",
         reply_markup=get_query_dates_keyboard(dates)
     )
 
@@ -321,7 +338,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Сумма': decimal_to_float(rec['amount'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Доходы - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Доходы - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"доходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -362,7 +379,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         
         await target_message.reply_text("\n".join(lines))
         
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Входные билеты - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Входные билеты - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"входные_билеты_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -381,7 +398,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Сумма': decimal_to_float(rec['amount'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Типы оплат - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Типы оплат - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"типы_оплат_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -409,7 +426,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         
         lines.append(f"Всего персонала: {total_staff}")
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Статистика персонала - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Статистика персонала - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"персонал_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -437,7 +454,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             })
         lines.append(f"Итого: {decimal_to_str(total)}")
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Расходы - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Расходы - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"расходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -479,7 +496,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
         
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Инкассация - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Инкассация - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"инкассация_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -514,7 +531,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
         
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Долги по персоналу - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Долги по персоналу - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"долги_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -566,7 +583,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             
             display_rows.append(row)
         
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Примечания - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Примечания - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"примечания_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -589,7 +606,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Чистая прибыль': decimal_to_float(rec['net_profit'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Итоговый баланс - {club_label}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Итоговый баланс - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"итого_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
@@ -1466,6 +1483,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text(f"❌ Ошибка: {str(e)}")
 
     elif data == "main_queries":
+        await send_queries_menu_message(query.message, context)
+
+    elif data.startswith("select_club|"):
+        selected_club = data.split("|", 1)[1]
+        context.user_data['current_club'] = selected_club
+        await query.answer(f"✅ Выбран: {selected_club}")
         await send_report_dates_menu(query.message, context)
 
     elif data.startswith("query_date|"):

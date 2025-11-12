@@ -329,8 +329,8 @@ class ExcelProcessor:
             logger.error(f"Error exporting to Excel: {e}")
             raise ValueError(f"Не удалось экспортировать данные: {str(e)}")
     
-    def export_to_excel_with_header(self, data: List[Dict[str, Any]], report_date, block_name: str) -> bytes:
-        """Экспорт данных в Excel с заголовком (дата и название блока)"""
+    def export_to_excel_with_header(self, data: List[Dict[str, Any]], report_date, block_name: str, club_name: str = None) -> bytes:
+        """Экспорт данных в Excel с заголовком (дата, клуб и название блока)"""
         try:
             from datetime import date
             from openpyxl.styles import Font
@@ -346,10 +346,14 @@ class ExcelProcessor:
                 # Получаем worksheet для добавления заголовка
                 worksheet = writer.sheets['Data']
                 
-                # Добавляем заголовок в первую строку
+                # Добавляем заголовок в первую строку: Дата в A1, Клуб в B1
                 date_str = report_date.strftime("%d.%m.%Y") if isinstance(report_date, date) else str(report_date)
                 worksheet['A1'] = f'Дата: {date_str}'
                 worksheet['A1'].font = Font(bold=True, size=12)
+                
+                if club_name:
+                    worksheet['B1'] = f'Клуб: {club_name}'
+                    worksheet['B1'].font = Font(bold=True, size=12)
             
             output.seek(0)
             return output.getvalue()
