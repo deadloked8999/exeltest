@@ -121,7 +121,7 @@ def get_files_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📄 Список файлов", callback_data="files_list")],
         [InlineKeyboardButton("🔍 Последние записи", callback_data="files_latest")],
-        [InlineKeyboardButton("🔄 Обновить последний файл", callback_data="files_reprocess")],
+        [InlineKeyboardButton("🔄 Переобработать все файлы", callback_data="files_reprocess")],
         [InlineKeyboardButton("🧼 Очистить все файлы", callback_data="files_clear")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
     ]
@@ -1572,97 +1572,111 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
     
     elif data == "files_reprocess":
-        # Переобработка последнего файла
+        # Переобработка ВСЕХ файлов пользователя
         try:
-            # Получаем последний файл пользователя
+            # Получаем ВСЕ файлы пользователя
             with db.get_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
                         """
                         SELECT id, file_name, file_content, report_date
                         FROM uploaded_files
-                        WHERE user_id = %s
+                        WHERE user_id = %s AND file_content IS NOT NULL
                         ORDER BY upload_date DESC
-                        LIMIT 1
                         """,
                         (user_id,)
                     )
-                    file_info = cur.fetchone()
+                    all_files = cur.fetchall()
             
-            if not file_info or not file_info.get('file_content'):
-                await query.message.reply_text("❌ Файл не найден или не сохранён")
+            if not all_files:
+                await query.message.reply_text("❌ Файлы не найдены")
                 return
             
-            file_id = file_info['id']
-            file_name = file_info['file_name']
-            file_content = file_info['file_content']
+            await query.message.reply_text(f"🔄 Начинаю переобработку {len(all_files)} файлов...")
             
-            await query.message.reply_text(f"🔄 Переобработка файла {file_name}...")
+            processed_count = 0
+            for file_info in all_files:
+                file_id = file_info['id']
+                file_name = file_info['file_name']
+                file_content = file_info['file_content']
+                
+                # Переобрабатываем все блоки этого файла
+                try:
+                    income_records = excel_processor.extract_income_records(file_content)
+                    if income_records:
+                        db.save_income_records(file_id, income_records)
+                    
+                    ticket_sales_data = excel_processor.extract_ticket_sales(file_content)
+                    if ticket_sales_data.get('records'):
+                        db.save_ticket_sales(file_id, ticket_sales_data['records'])
+                    
+                    payment_types_data = excel_processor.extract_payment_types(file_content)
+                    if payment_types_data.get('records'):
+                        db.save_payment_types(file_id, payment_types_data['records'])
+                    
+                    staff_stats = excel_processor.extract_staff_statistics(file_content)
+                    if staff_stats:
+                        db.save_staff_statistics(file_id, staff_stats)
+                    
+                    expense_data = excel_processor.extract_expense_records(file_content)
+                    if expense_data.get('records'):
+                        db.save_expense_records(file_id, expense_data['records'])
+                    
+                    cash_collection_data = excel_processor.extract_cash_collection(file_content)
+                    if cash_collection_data.get('records'):
+                        db.save_cash_collection(file_id, cash_collection_data['records'])
+                    
+                    staff_debts_data = excel_processor.extract_staff_debts(file_content)
+                    if staff_debts_data.get('records'):
+                        db.save_staff_debts(file_id, staff_debts_data['records'])
+                    
+                    notes_data = excel_processor.extract_notes_entries(file_content)
+                    if notes_data:
+                        notes_records = []
+                        for entry in notes_data.get('безнал', []):
+                            notes_records.append({
+                                'category': entry.get('category', 'безнал'),
+                                'entry_text': entry.get('entry_text', ''),
+                                'is_total': entry.get('is_total', False),
+                                'amount': entry.get('amount')
+                            })
+                        for entry in notes_data.get('нал', []):
+                            notes_records.append({
+                                'category': entry.get('category', 'нал'),
+                                'entry_text': entry.get('entry_text', ''),
+                                'is_total': entry.get('is_total', False),
+                                'amount': entry.get('amount')
+                            })
+                        for text in notes_data.get('extra', []):
+                            notes_records.append({
+                                'category': 'прочее',
+                                'entry_text': text,
+                                'is_total': False,
+                                'amount': None
+                            })
+                        if notes_records:
+                            db.save_notes_entries(file_id, notes_records)
+                    
+                    totals_summary = excel_processor.extract_totals_summary(file_content)
+                    if totals_summary:
+                        db.save_totals_summary(file_id, totals_summary)
+                    
+                    processed_count += 1
+                    
+                except Exception as e:
+                    logger.error(f"Error reprocessing file {file_name}: {e}")
+                    await query.message.reply_text(f"❌ Ошибка при обработке {file_name}: {str(e)}")
             
-            # Переобрабатываем все блоки
-            income_records = excel_processor.extract_income_records(file_content)
-            if income_records:
-                db.save_income_records(file_id, income_records)
-            
-            ticket_sales_data = excel_processor.extract_ticket_sales(file_content)
-            if ticket_sales_data.get('records'):
-                db.save_ticket_sales(file_id, ticket_sales_data['records'])
-            
-            payment_types_data = excel_processor.extract_payment_types(file_content)
-            if payment_types_data.get('records'):
-                db.save_payment_types(file_id, payment_types_data['records'])
-            
-            staff_stats = excel_processor.extract_staff_statistics(file_content)
-            if staff_stats:
-                db.save_staff_statistics(file_id, staff_stats)
-            
-            expense_data = excel_processor.extract_expense_records(file_content)
-            if expense_data.get('records'):
-                db.save_expense_records(file_id, expense_data['records'])
-            
-            cash_collection_data = excel_processor.extract_cash_collection(file_content)
-            if cash_collection_data.get('records'):
-                db.save_cash_collection(file_id, cash_collection_data['records'])
-            
-            staff_debts_data = excel_processor.extract_staff_debts(file_content)
-            if staff_debts_data.get('records'):
-                db.save_staff_debts(file_id, staff_debts_data['records'])
-            
-            notes_data = excel_processor.extract_notes_entries(file_content)
-            if notes_data:
-                notes_records = []
-                for entry in notes_data.get('безнал', []):
-                    notes_records.append({
-                        'category': entry.get('category', 'безнал'),
-                        'entry_text': entry.get('entry_text', ''),
-                        'is_total': entry.get('is_total', False),
-                        'amount': entry.get('amount')
-                    })
-                for entry in notes_data.get('нал', []):
-                    notes_records.append({
-                        'category': entry.get('category', 'нал'),
-                        'entry_text': entry.get('entry_text', ''),
-                        'is_total': entry.get('is_total', False),
-                        'amount': entry.get('amount')
-                    })
-                for text in notes_data.get('extra', []):
-                    notes_records.append({
-                        'category': 'прочее',
-                        'entry_text': text,
-                        'is_total': False,
-                        'amount': None
-                    })
-                if notes_records:
-                    db.save_notes_entries(file_id, notes_records)
-            
-            totals_summary = excel_processor.extract_totals_summary(file_content)
-            if totals_summary:
-                db.save_totals_summary(file_id, totals_summary)
-            
-            await query.message.reply_text("✅ Файл обновлён! Все блоки переобработаны с новым парсером.", reply_markup=get_files_keyboard())
+            # Финальное сообщение
+            await query.message.reply_text(
+                f"✅ Переобработка завершена!\n\n"
+                f"Обработано файлов: {processed_count} из {len(all_files)}\n\n"
+                f"Все блоки обновлены с новым парсером.",
+                reply_markup=get_files_keyboard()
+            )
             
         except Exception as e:
-            logger.error(f"Error reprocessing file: {e}")
+            logger.error(f"Error reprocessing files: {e}")
             await query.message.reply_text(f"❌ Ошибка: {str(e)}")
 
     elif data == "main_queries":
