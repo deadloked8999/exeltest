@@ -120,6 +120,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
 def get_files_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📄 Список файлов", callback_data="files_list")],
+        [InlineKeyboardButton("📅 Даты отчётов по клубу", callback_data="files_dates_by_club")],
         [InlineKeyboardButton("🔍 Последние записи", callback_data="files_latest")],
         [InlineKeyboardButton("🔄 Переобработать все файлы", callback_data="files_reprocess")],
         [InlineKeyboardButton("🧼 Очистить все файлы", callback_data="files_clear")],
@@ -1549,6 +1550,61 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data in {"files_list", "my_files"}:
         await send_recent_files(query.message)
+
+    elif data == "files_dates_by_club":
+        # Показываем выбор клуба для просмотра дат
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏢 Москвич", callback_data="dates_club|Москвич")],
+            [InlineKeyboardButton("🌟 Анора", callback_data="dates_club|Анора")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="files_menu")]
+        ])
+        await query.message.reply_text(
+            "📅 Выберите клуб для просмотра дат:",
+            reply_markup=keyboard
+        )
+
+    elif data.startswith("dates_club|"):
+        # Показываем список дат для выбранного клуба
+        club_name = data.split("|", 1)[1]
+        
+        # Получаем все даты для клуба
+        dates = db.get_report_dates(club_name=club_name)
+        
+        if not dates:
+            await query.message.reply_text(
+                f"📭 Нет отчётов для клуба {club_name}",
+                reply_markup=get_files_keyboard()
+            )
+            return
+        
+        # Группируем даты по периодам (месяцам)
+        from collections import defaultdict
+        dates_by_month = defaultdict(list)
+        
+        for dt in dates:
+            month_key = dt.strftime("%B %Y")  # Например: "November 2025"
+            dates_by_month[month_key].append(dt)
+        
+        # Формируем сообщение
+        lines = [f"📅 Даты отчётов для клуба: {club_name}\n"]
+        
+        for month, month_dates in sorted(dates_by_month.items(), reverse=True):
+            lines.append(f"\n📆 {month}:")
+            for dt in sorted(month_dates, reverse=True):
+                lines.append(f"  • {format_report_date(dt)}")
+        
+        lines.append(f"\n\n📊 Всего отчётов: {len(dates)}")
+        
+        # Определяем период
+        if dates:
+            first_date = min(dates)
+            last_date = max(dates)
+            lines.append(f"📅 Период: {format_report_date(first_date)} - {format_report_date(last_date)}")
+        
+        await query.message.reply_text(
+            "\n".join(lines),
+            reply_markup=get_files_keyboard()
+        )
 
     elif data == "files_latest":
         await send_latest_records(query.message)
