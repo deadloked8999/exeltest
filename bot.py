@@ -326,6 +326,79 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_expenses_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по расходам за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {expense_item: sum}
+    expense_summary = defaultdict(Decimal)
+    # Список для сохранения порядка статей расходов (берем из файла с максимумом статей)
+    expense_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные статьи расходов из ВСЕХ файлов периода
+    all_expenses_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_expense_records(file_id)
+        
+        file_expenses = []
+        for rec in records:
+            expense_item = rec.get('expense_item')
+            amount = rec.get('amount') or Decimal('0')
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это итоговая строка - пропускаем, посчитаем сами
+                continue
+            
+            # Суммируем
+            expense_summary[expense_item] += amount
+            
+            # Запоминаем порядок для этого файла
+            if expense_item not in file_expenses:
+                file_expenses.append(expense_item)
+        
+        all_expenses_by_file.append(file_expenses)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом статей расходов
+    if all_expenses_by_file:
+        expense_order = max(all_expenses_by_file, key=len)
+    
+    # ШАГ 3: Добавляем статьи, которые есть в других файлах, но нет в expense_order
+    for file_expenses in all_expenses_by_file:
+        for expense in file_expenses:
+            if expense not in expense_order:
+                expense_order.append(expense)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    total_amount = Decimal('0')
+    
+    for expense_item in expense_order:
+        amt = expense_summary.get(expense_item, Decimal('0'))
+        total_amount += amt
+        
+        display_rows.append({
+            'Статья расхода': expense_item,
+            'Сумма': decimal_to_float(amt)
+        })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Статья расхода': 'ИТОГО',
+        'Сумма': decimal_to_float(total_amount)
+    })
+    
+    return display_rows, total_amount
+
+
 async def generate_staff_statistics_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по статистике персонала за период"""
     from collections import defaultdict
@@ -1565,7 +1638,46 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'staff':
+            if block_id == 'expenses':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по расходам...")
+                
+                result = await generate_expenses_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_amount = result
+                
+                # Формируем предпросмотр
+                lines = [f"💸 Расходы за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    expense_item = row['Статья расхода']
+                    amt = Decimal(str(row['Сумма']))
+                    
+                    if 'итого' in str(expense_item).lower():
+                        lines.append(f"\n📊 {expense_item}: {decimal_to_str(amt)}")
+                    else:
+                        lines.append(f"• {expense_item}: {decimal_to_str(amt)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Расходы"
+                )
+                
+                filename = f"расходы_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Расходы\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
+            elif block_id == 'staff':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по персоналу...")
                 
                 result = await generate_staff_statistics_period_report(club_name, start_date, end_date)
@@ -2089,6 +2201,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🎟 Входные билеты", callback_data="report_block|tickets")],
             [InlineKeyboardButton("💳 Типы оплат", callback_data="report_block|payments")],
             [InlineKeyboardButton("👥 Статистика персонала", callback_data="report_block|staff")],
+            [InlineKeyboardButton("💸 Расходы", callback_data="report_block|expenses")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -2113,7 +2226,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             'income': 'Доходы',
             'tickets': 'Входные билеты',
             'payments': 'Типы оплат',
-            'staff': 'Статистика персонала'
+            'staff': 'Статистика персонала',
+            'expenses': 'Расходы'
         }
         block_name = block_names.get(block_id, block_id)
         
