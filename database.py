@@ -56,7 +56,8 @@ class Database:
     
     def save_uploaded_file(self, user_id: int, username: str, file_name: str, 
                           file_content: bytes, row_count: int,
-                          report_date: Optional[date] = None) -> int:
+                          report_date: Optional[date] = None,
+                          club_name: Optional[str] = None) -> int:
         """Сохранение информации о загруженном файле"""
         file_hash = hashlib.sha256(file_content).hexdigest()
         
@@ -64,14 +65,14 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO uploaded_files (user_id, username, file_name, file_hash, row_count, report_date, file_content)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO uploaded_files (user_id, username, file_name, file_hash, row_count, report_date, file_content, club_name)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                     """,
-                    (user_id, username, file_name, file_hash, row_count, report_date, file_content)
+                    (user_id, username, file_name, file_hash, row_count, report_date, file_content, club_name)
                 )
                 file_id = cur.fetchone()[0]
-                logger.info(f"File saved with ID: {file_id}")
+                logger.info(f"File saved with ID: {file_id}, Club: {club_name}")
                 return file_id
     
     def save_excel_data(self, file_id: int, data: List[Dict[str, Any]]):
@@ -671,33 +672,58 @@ class Database:
                     (report_date, file_id)
                 )
 
-    def get_report_dates(self) -> List[date]:
+    def get_report_dates(self, club_name: Optional[str] = None) -> List[date]:
         with self.get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    SELECT DISTINCT report_date
-                    FROM uploaded_files
-                    WHERE report_date IS NOT NULL
-                    ORDER BY report_date DESC
-                    """
-                )
+                if club_name and club_name != 'Оба':
+                    cur.execute(
+                        """
+                        SELECT DISTINCT report_date
+                        FROM uploaded_files
+                        WHERE report_date IS NOT NULL AND club_name = %s
+                        ORDER BY report_date DESC
+                        """,
+                        (club_name,)
+                    )
+                else:
+                    # Режим "Оба" - показываем все даты
+                    cur.execute(
+                        """
+                        SELECT DISTINCT report_date
+                        FROM uploaded_files
+                        WHERE report_date IS NOT NULL
+                        ORDER BY report_date DESC
+                        """
+                    )
                 rows = cur.fetchall()
                 return [row[0] for row in rows if row[0] is not None]
 
-    def get_file_by_report_date(self, report_date: date) -> Optional[Dict[str, Any]]:
+    def get_file_by_report_date(self, report_date: date, club_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         with self.get_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM uploaded_files
-                    WHERE report_date = %s
-                    ORDER BY upload_date DESC
-                    LIMIT 1
-                    """,
-                    (report_date,)
-                )
+                if club_name and club_name != 'Оба':
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM uploaded_files
+                        WHERE report_date = %s AND club_name = %s
+                        ORDER BY upload_date DESC
+                        LIMIT 1
+                        """,
+                        (report_date, club_name)
+                    )
+                else:
+                    # Режим "Оба" - берем последний файл за дату (любой клуб)
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM uploaded_files
+                        WHERE report_date = %s
+                        ORDER BY upload_date DESC
+                        LIMIT 1
+                        """,
+                        (report_date,)
+                    )
                 result = cur.fetchone()
                 return dict(result) if result else None
 

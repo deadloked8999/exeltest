@@ -109,8 +109,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(BUTTON_FILES), KeyboardButton(BUTTON_QUERIES)],
-        [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_HELP)]
+        [KeyboardButton("🏢 Москвич"), KeyboardButton("🌟 Анора")],
+        [KeyboardButton("📊 Оба клуба")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -236,13 +236,12 @@ def decimal_to_float(value) -> Optional[float]:
 
 async def send_main_menu_message(target_message):
     await target_message.reply_text(
-        "Главное меню. Используйте кнопки ниже для выбора раздела:",
+        "🏢 Выберите клуб для работы:\n\n"
+        "• Москвич - работа с клубом Москвич\n"
+        "• Анора - работа с клубом Анора\n"  
+        "• Оба клуба - просмотр сводных отчетов\n\n"
+        "⚠️ Загрузка файлов доступна только при выборе конкретного клуба!",
         reply_markup=get_main_reply_keyboard()
-    )
-
-    await target_message.reply_text(
-        "Доступные действия:",
-        reply_markup=get_main_menu_keyboard()
     )
 
 
@@ -260,12 +259,13 @@ async def send_employees_menu_message(target_message):
     )
 
 
-async def send_queries_menu_message(target_message):
-    await send_report_dates_menu(target_message)
+async def send_queries_menu_message(target_message, context=None):
+    await send_report_dates_menu(target_message, context)
 
 
-async def send_report_dates_menu(target_message):
-    dates = db.get_report_dates()
+async def send_report_dates_menu(target_message, context=None):
+    club_name = context.user_data.get('current_club') if context else None
+    dates = db.get_report_dates(club_name=club_name)
     if not dates:
         await target_message.reply_text(
             "📭 Пока нет отчётов с установленной датой. Загрузите файл и укажите дату."
@@ -285,13 +285,19 @@ async def send_blocks_menu_message(target_message, report_date: date):
     )
 
 
-async def send_report_block_data(target_message, report_date: date, block_id: str):
-    file_info = db.get_file_by_report_date(report_date)
+async def send_report_block_data(target_message, report_date: date, block_id: str, context=None):
+    club_name = context.user_data.get('current_club') if context else None
+    file_info = db.get_file_by_report_date(report_date, club_name=club_name)
     if not file_info:
         await target_message.reply_text("⚠️ Отчёт на эту дату не найден.")
         return
 
     file_id = file_info['id']
+    stored_club_name = file_info.get('club_name', 'Неизвестно')
+    club_label = stored_club_name if stored_club_name else 'Неизвестно'
+    if club_name == 'Оба':
+        club_label = f"Сводный ({stored_club_name})"
+    
     block_label = next((label for bid, label in QUERY_BLOCKS if bid == block_id), block_id)
 
     if block_id == 'income':
@@ -303,7 +309,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         # Отладка: проверим, что приходит из базы
         logger.info(f"Income records from DB: {records}")
         
-        lines = [f"💰 Доходы ({format_report_date(report_date)}):"]
+        lines = [f"💰 Доходы ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         for rec in records:
             amount_val = rec.get('amount')
@@ -314,8 +320,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Сумма': decimal_to_float(rec['amount'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Доходы")
-        await target_message.reply_document(excel_bytes, filename=f"доходы_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Доходы - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"доходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'tickets':
@@ -323,7 +329,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по входным билетам для этой даты.")
             return
-        lines = [f"🎟 Входные билеты ({format_report_date(report_date)}):"]
+        lines = [f"🎟 Входные билеты ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         total_quantity = 0
         total_amount = Decimal('0')
@@ -355,8 +361,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         
         await target_message.reply_text("\n".join(lines))
         
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Входные билеты")
-        await target_message.reply_document(excel_bytes, filename=f"входные_билеты_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Входные билеты - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"входные_билеты_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'payments':
@@ -364,7 +370,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по типам оплат для этой даты.")
             return
-        lines = [f"💳 Типы оплат ({format_report_date(report_date)}):"]
+        lines = [f"💳 Типы оплат ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         for rec in records:
             label = rec['payment_type']
@@ -374,8 +380,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Сумма': decimal_to_float(rec['amount'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Типы оплат")
-        await target_message.reply_document(excel_bytes, filename=f"типы_оплат_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Типы оплат - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"типы_оплат_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'staff':
@@ -383,7 +389,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по персоналу для этой даты.")
             return
-        lines = [f"👥 Статистика персонала ({format_report_date(report_date)}):"]
+        lines = [f"👥 Статистика персонала ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         total_staff = 0
         for rec in records:
@@ -402,8 +408,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         
         lines.append(f"Всего персонала: {total_staff}")
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Статистика персонала")
-        await target_message.reply_document(excel_bytes, filename=f"персонал_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Статистика персонала - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"персонал_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'expenses':
@@ -411,7 +417,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по расходам для этой даты.")
             return
-        lines = [f"💸 Расходы ({format_report_date(report_date)}):"]
+        lines = [f"💸 Расходы ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         total = Decimal('0.00')
         for rec in records:
@@ -430,8 +436,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             })
         lines.append(f"Итого: {decimal_to_str(total)}")
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Расходы")
-        await target_message.reply_document(excel_bytes, filename=f"расходы_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Расходы - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"расходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'cash':
@@ -439,7 +445,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по инкассации для этой даты.")
             return
-        lines = [f"🏦 Инкассация ({format_report_date(report_date)}):"]
+        lines = [f"🏦 Инкассация ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         total_amount = Decimal('0')
         
@@ -472,8 +478,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
         
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Инкассация")
-        await target_message.reply_document(excel_bytes, filename=f"инкассация_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Инкассация - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"инкассация_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'debts':
@@ -481,7 +487,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет данных по долгам персонала для этой даты.")
             return
-        lines = [f"📌 Долги по персоналу ({format_report_date(report_date)}):"]
+        lines = [f"📌 Долги по персоналу ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         total_amount = Decimal('0')
         
@@ -507,8 +513,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
         
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Долги по персоналу")
-        await target_message.reply_document(excel_bytes, filename=f"долги_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Долги по персоналу - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"долги_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'notes':
@@ -521,7 +527,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         nal_records = [r for r in records if r['category'] == 'нал']
         beznal_records = [r for r in records if r['category'] == 'безнал']
         
-        lines = [f"📝 Примечания ({format_report_date(report_date)}):"]
+        lines = [f"📝 Примечания ({format_report_date(report_date)}) - {club_label}:"]
         lines.append("\n💳 Долг безнал:")
         for rec in beznal_records:
             if rec.get('is_total'):
@@ -559,8 +565,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             
             display_rows.append(row)
         
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Примечания")
-        await target_message.reply_document(excel_bytes, filename=f"примечания_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Примечания - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"примечания_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'totals':
@@ -568,7 +574,7 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет итогового баланса для этой даты.")
             return
-        lines = [f"📊 Итоговый баланс ({format_report_date(report_date)}):"]
+        lines = [f"📊 Итоговый баланс ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
         for rec in records:
             lines.append(
@@ -582,8 +588,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Чистая прибыль': decimal_to_float(rec['net_profit'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Итоговый баланс")
-        await target_message.reply_document(excel_bytes, filename=f"итого_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Итоговый баланс - {club_label}")
+        await target_message.reply_document(excel_bytes, filename=f"итого_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     await target_message.reply_text("⚠️ Неизвестный блок.")
@@ -632,7 +638,7 @@ async def queries_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await request_password(update.message, context)
         return
 
-    await send_queries_menu_message(update.message)
+    await send_queries_menu_message(update.message, context)
 
 
 async def employees_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -855,6 +861,27 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await request_password(update.message, context)
         return
 
+    # Проверка выбора клуба
+    current_club = context.user_data.get('current_club')
+    
+    if not current_club:
+        await update.message.reply_text(
+            "⚠️ Сначала выберите клуб!\n\n"
+            "Используйте кнопки меню:\n"
+            "• 🏢 Москвич\n"
+            "• 🌟 Анора"
+        )
+        return
+    
+    if current_club == 'Оба':
+        await update.message.reply_text(
+            "❌ Загрузка файлов в режиме 'Оба клуба' недоступна!\n\n"
+            "Для загрузки отчета выберите конкретный клуб:\n"
+            "• 🏢 Москвич\n"
+            "• 🌟 Анора"
+        )
+        return
+
     document = update.message.document
     user = update.effective_user
     
@@ -887,14 +914,15 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Обработка Excel файла
         data, stats = excel_processor.process_file(bytes(file_content), document.file_name)
         
-        # Сохранение в БД
+        # Сохранение в БД с указанием клуба
         file_id = db.save_uploaded_file(
             user_id=user.id,
             username=user.username or user.first_name,
             file_name=document.file_name,
             file_content=bytes(file_content),
             row_count=len(data),
-            report_date=report_date
+            report_date=report_date,
+            club_name=current_club
         )
         
         db.save_excel_data(file_id, data)
@@ -1088,12 +1116,48 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    # Обработка выбора клуба
+    if user_message.strip() == "🏢 Москвич":
+        context.user_data['current_club'] = 'Москвич'
+        await update.message.reply_text(
+            "✅ Выбран клуб: Москвич\n\n"
+            "Теперь вы можете:\n"
+            "• Загружать отчеты для Москвича\n"
+            "• Просматривать данные Москвича по датам и блокам\n\n"
+            "Отправьте Excel файл для начала работы.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    if user_message.strip() == "🌟 Анора":
+        context.user_data['current_club'] = 'Анора'
+        await update.message.reply_text(
+            "✅ Выбран клуб: Анора\n\n"
+            "Теперь вы можете:\n"
+            "• Загружать отчеты для Аноры\n"
+            "• Просматривать данные Аноры по датам и блокам\n\n"
+            "Отправьте Excel файл для начала работы.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
+    if user_message.strip() == "📊 Оба клуба":
+        context.user_data['current_club'] = 'Оба'
+        await update.message.reply_text(
+            "✅ Режим просмотра: Оба клуба\n\n"
+            "Вы можете просматривать сводные данные по обоим клубам.\n\n"
+            "⚠️ Загрузка файлов в этом режиме НЕДОСТУПНА!\n"
+            "Для загрузки выберите конкретный клуб (Москвич или Анора).",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+
     if user_message.strip() == BUTTON_FILES:
         await send_files_menu_message(update.message)
         return
 
     if user_message.strip() == BUTTON_QUERIES:
-        await send_queries_menu_message(update.message)
+        await send_queries_menu_message(update.message, context)
         return
 
     if user_message.strip() == BUTTON_EMPLOYEES:
@@ -1388,7 +1452,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await query.message.reply_text(f"❌ Ошибка: {str(e)}")
 
     elif data == "main_queries":
-        await send_report_dates_menu(query.message)
+        await send_report_dates_menu(query.message, context)
 
     elif data.startswith("query_date|"):
         date_str = data.split("|", 1)[1]
@@ -1406,7 +1470,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except ValueError:
             await query.message.reply_text("⚠️ Некорректная дата.")
             return
-        await send_report_block_data(query.message, report_date, block_id)
+        await send_report_block_data(query.message, report_date, block_id, context)
 
     elif data == "main_help":
         await query.message.reply_text(build_help_text(), parse_mode='Markdown')

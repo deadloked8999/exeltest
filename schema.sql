@@ -17,6 +17,9 @@ ALTER TABLE uploaded_files
 ALTER TABLE uploaded_files
     ADD COLUMN IF NOT EXISTS file_content BYTEA;
 
+ALTER TABLE uploaded_files
+    ADD COLUMN IF NOT EXISTS club_name VARCHAR(50);
+
 -- Создание таблицы для хранения данных из Excel файлов
 CREATE TABLE IF NOT EXISTS excel_data (
     id SERIAL PRIMARY KEY,
