@@ -326,6 +326,79 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_staff_debts_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по долгам персонала за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {debt_type: sum}
+    debt_summary = defaultdict(Decimal)
+    # Список для сохранения порядка типов долгов (берем из файла с максимумом типов)
+    debt_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные типы долгов из ВСЕХ файлов периода
+    all_debts_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_staff_debts(file_id)
+        
+        file_debts = []
+        for rec in records:
+            debt_type = rec.get('debt_type')
+            amount = rec.get('amount') or Decimal('0')
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это итоговая строка - пропускаем, посчитаем сами
+                continue
+            
+            # Суммируем
+            debt_summary[debt_type] += amount
+            
+            # Запоминаем порядок для этого файла
+            if debt_type not in file_debts:
+                file_debts.append(debt_type)
+        
+        all_debts_by_file.append(file_debts)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом типов долгов
+    if all_debts_by_file:
+        debt_order = max(all_debts_by_file, key=len)
+    
+    # ШАГ 3: Добавляем типы, которые есть в других файлах, но нет в debt_order
+    for file_debts in all_debts_by_file:
+        for debt in file_debts:
+            if debt not in debt_order:
+                debt_order.append(debt)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    total_amount = Decimal('0')
+    
+    for debt_type in debt_order:
+        amt = debt_summary.get(debt_type, Decimal('0'))
+        total_amount += amt
+        
+        display_rows.append({
+            'Тип долга': debt_type,
+            'Сумма': decimal_to_float(amt)
+        })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Тип долга': 'ИТОГО',
+        'Сумма': decimal_to_float(total_amount)
+    })
+    
+    return display_rows, total_amount
+
+
 async def generate_cash_collection_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по инкассации за период"""
     from collections import defaultdict
@@ -1722,7 +1795,46 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'cash':
+            if block_id == 'debts':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по долгам персонала...")
+                
+                result = await generate_staff_debts_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_amount = result
+                
+                # Формируем предпросмотр
+                lines = [f"📌 Долги по персоналу за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    debt_type = row['Тип долга']
+                    amt = Decimal(str(row['Сумма']))
+                    
+                    if 'итого' in str(debt_type).lower():
+                        lines.append(f"\n📊 {debt_type}: {decimal_to_str(amt)}")
+                    else:
+                        lines.append(f"• {debt_type}: {decimal_to_str(amt)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Долги по персоналу"
+                )
+                
+                filename = f"долги_персонала_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Долги по персоналу\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
+            elif block_id == 'cash':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по инкассации...")
                 
                 result = await generate_cash_collection_period_report(club_name, start_date, end_date)
@@ -2331,6 +2443,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("👥 Статистика персонала", callback_data="report_block|staff")],
             [InlineKeyboardButton("💸 Расходы", callback_data="report_block|expenses")],
             [InlineKeyboardButton("🏦 Инкассация", callback_data="report_block|cash")],
+            [InlineKeyboardButton("📌 Долги по персоналу", callback_data="report_block|debts")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -2357,7 +2470,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             'payments': 'Типы оплат',
             'staff': 'Статистика персонала',
             'expenses': 'Расходы',
-            'cash': 'Инкассация'
+            'cash': 'Инкассация',
+            'debts': 'Долги по персоналу'
         }
         block_name = block_names.get(block_id, block_id)
         
