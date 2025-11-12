@@ -326,6 +326,122 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_full_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация ПОЛНОГО комплексного отчета за период со всеми блоками"""
+    
+    all_blocks = {}
+    
+    # 1. Доходы
+    income_data = await generate_income_period_report(club_name, start_date, end_date)
+    if income_data:
+        all_blocks['Доходы'] = income_data
+    
+    # 2. Входные билеты
+    tickets_result = await generate_tickets_period_report(club_name, start_date, end_date)
+    if tickets_result:
+        all_blocks['Входные билеты'] = tickets_result[0]  # tickets_result = (data, total_qty, total_amt)
+    
+    # 3. Типы оплат
+    payments_result = await generate_payment_types_period_report(club_name, start_date, end_date)
+    if payments_result:
+        all_blocks['Типы оплат'] = payments_result[0]  # payments_result = (data, total_amt)
+    
+    # 4. Статистика персонала
+    staff_result = await generate_staff_statistics_period_report(club_name, start_date, end_date)
+    if staff_result:
+        all_blocks['Статистика персонала'] = staff_result[0]
+    
+    # 5. Расходы
+    expenses_result = await generate_expenses_period_report(club_name, start_date, end_date)
+    if expenses_result:
+        all_blocks['Расходы'] = expenses_result[0]
+    
+    # 6. Инкассация
+    cash_result = await generate_cash_collection_period_report(club_name, start_date, end_date)
+    if cash_result:
+        all_blocks['Инкассация'] = cash_result[0]
+    
+    # 7. Долги по персоналу
+    debts_result = await generate_staff_debts_period_report(club_name, start_date, end_date)
+    if debts_result:
+        all_blocks['Долги по персоналу'] = debts_result[0]
+    
+    # 8. Итоговый баланс
+    totals_data = await generate_totals_summary_period_report(club_name, start_date, end_date)
+    if totals_data:
+        all_blocks['Итоговый баланс'] = totals_data
+    
+    return all_blocks if all_blocks else None
+
+
+async def generate_totals_summary_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по итоговому балансу за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {payment_type: {'income': sum, 'expense': sum, 'profit': sum}}
+    totals_summary = defaultdict(lambda: {'income': Decimal('0'), 'expense': Decimal('0'), 'profit': Decimal('0')})
+    # Список для сохранения порядка типов оплат
+    payment_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные типы оплат из ВСЕХ файлов периода
+    all_payments_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_totals_summary(file_id)
+        
+        file_payments = []
+        for rec in records:
+            payment_type = rec.get('payment_type')
+            income_amount = rec.get('income_amount') or Decimal('0')
+            expense_amount = rec.get('expense_amount') or Decimal('0')
+            net_profit = rec.get('net_profit') or Decimal('0')
+            
+            # Суммируем
+            totals_summary[payment_type]['income'] += income_amount
+            totals_summary[payment_type]['expense'] += expense_amount
+            totals_summary[payment_type]['profit'] += net_profit
+            
+            # Запоминаем порядок для этого файла
+            if payment_type not in file_payments:
+                file_payments.append(payment_type)
+        
+        all_payments_by_file.append(file_payments)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом типов оплат
+    if all_payments_by_file:
+        payment_order = max(all_payments_by_file, key=len)
+    
+    # ШАГ 3: Добавляем типы, которые есть в других файлах, но нет в payment_order
+    for file_payments in all_payments_by_file:
+        for payment in file_payments:
+            if payment not in payment_order:
+                payment_order.append(payment)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    
+    for payment_type in payment_order:
+        income = totals_summary[payment_type]['income']
+        expense = totals_summary[payment_type]['expense']
+        profit = totals_summary[payment_type]['profit']
+        
+        display_rows.append({
+            'Тип оплаты': payment_type,
+            'Доход': decimal_to_float(income),
+            'Расход': decimal_to_float(expense),
+            'Чистая прибыль': decimal_to_float(profit)
+        })
+    
+    return display_rows
+
+
 async def generate_staff_debts_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по долгам персонала за период"""
     from collections import defaultdict
@@ -1795,7 +1911,39 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'debts':
+            if block_id == 'full':
+                processing_msg = await update.message.reply_text("⏳ Формирую ПОЛНЫЙ комплексный отчет за период...")
+                
+                all_blocks = await generate_full_period_report(club_name, start_date, end_date)
+                
+                if not all_blocks:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                # Формируем краткий предпросмотр
+                lines = [f"📋 ПОЛНЫЙ ОТЧЕТ за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                lines.append(f"✅ Сформировано блоков: {len(all_blocks)}\n")
+                
+                for block_name in all_blocks.keys():
+                    lines.append(f"• {block_name}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_full_period_report_to_excel(
+                    all_blocks, club_name, start_date, end_date
+                )
+                
+                filename = f"полный_отчет_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📋 ПОЛНЫЙ КОМПЛЕКСНЫЙ ОТЧЕТ\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}\n📊 Блоков: {len(all_blocks)}"
+                )
+            
+            elif block_id == 'debts':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по долгам персонала...")
                 
                 result = await generate_staff_debts_period_report(club_name, start_date, end_date)
@@ -2437,6 +2585,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         # Показываем выбор блока
         keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 ПОЛНЫЙ ОТЧЕТ (все блоки)", callback_data="report_block|full")],
             [InlineKeyboardButton("💰 Доходы", callback_data="report_block|income")],
             [InlineKeyboardButton("🎟 Входные билеты", callback_data="report_block|tickets")],
             [InlineKeyboardButton("💳 Типы оплат", callback_data="report_block|payments")],
@@ -2465,6 +2614,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         context.user_data['awaiting_report_period'] = True
         
         block_names = {
+            'full': 'Полный отчет (все блоки)',
             'income': 'Доходы',
             'tickets': 'Входные билеты',
             'payments': 'Типы оплат',

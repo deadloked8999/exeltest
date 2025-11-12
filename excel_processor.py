@@ -325,6 +325,75 @@ class ExcelProcessor:
             logger.error(f"Error exporting to Excel: {e}")
             raise ValueError(f"Не удалось экспортировать данные: {str(e)}")
     
+    def export_full_period_report_to_excel(self, all_blocks: Dict[str, List[Dict[str, Any]]], club_name: str, start_date, end_date) -> bytes:
+        """Экспорт ПОЛНОГО комплексного отчета за период в Excel со всеми блоками"""
+        try:
+            from datetime import date
+            from openpyxl import Workbook
+            from openpyxl.styles import Font
+            
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Полный отчет"
+            
+            # Заголовок отчета
+            ws['A1'] = f'Клуб: {club_name}'
+            ws['A1'].font = Font(bold=True, size=14)
+            
+            start_str = start_date.strftime("%d.%m.%Y") if isinstance(start_date, date) else str(start_date)
+            end_str = end_date.strftime("%d.%m.%Y") if isinstance(end_date, date) else str(end_date)
+            ws['B1'] = f'Период: {start_str} - {end_str}'
+            ws['B1'].font = Font(bold=True, size=14)
+            
+            current_row = 3  # Начинаем с 3-й строки
+            
+            bold_font = Font(bold=True, size=11)
+            block_title_font = Font(bold=True, size=13)
+            
+            # Обрабатываем каждый блок
+            for block_name, block_data in all_blocks.items():
+                if not block_data:
+                    continue
+                
+                # Заголовок блока
+                ws.cell(row=current_row, column=1, value=f"📊 {block_name.upper()}")
+                ws.cell(row=current_row, column=1).font = block_title_font
+                current_row += 1
+                
+                # Заголовки колонок
+                if block_data:
+                    headers = list(block_data[0].keys())
+                    for col_idx, header in enumerate(headers, start=1):
+                        cell = ws.cell(row=current_row, column=col_idx, value=header)
+                        cell.font = bold_font
+                    current_row += 1
+                    
+                    # Данные блока
+                    for row_data in block_data:
+                        for col_idx, header in enumerate(headers, start=1):
+                            value = row_data.get(header)
+                            cell = ws.cell(row=current_row, column=col_idx, value=value)
+                            
+                            # Делаем строки с "ИТОГО" жирными
+                            first_col_value = row_data.get(headers[0])
+                            if first_col_value and isinstance(first_col_value, str) and 'итого' in first_col_value.lower():
+                                cell.font = bold_font
+                        
+                        current_row += 1
+                
+                # Пустая строка между блоками
+                current_row += 1
+            
+            # Сохраняем в память
+            output = io.BytesIO()
+            wb.save(output)
+            output.seek(0)
+            return output.getvalue()
+        
+        except Exception as e:
+            logger.error(f"Error exporting full period report to Excel: {e}")
+            raise ValueError(f"Не удалось экспортировать комплексный отчет: {str(e)}")
+    
     def export_period_report_to_excel(self, data: List[Dict[str, Any]], club_name: str, start_date, end_date, block_name: str) -> bytes:
         """Экспорт сводного отчета за период в Excel"""
         try:
