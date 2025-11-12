@@ -756,7 +756,7 @@ class ExcelProcessor:
         }
 
     def extract_cash_collection(self, file_content: bytes) -> Dict[str, Any]:
-        """Извлечение блока «Инкассация»"""
+        """Извлечение блока «Инкассация» - горизонтальный формат"""
         try:
             df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='openpyxl')
         except Exception as e:
@@ -766,62 +766,84 @@ class ExcelProcessor:
         if df.empty:
             return {}
 
+        # Ищем заголовок "Инкассация" в любой колонке
+        cash_col = None
         start_row = None
-        for idx, value in enumerate(df.iloc[:, 0]):
-            if isinstance(value, str) and value.strip().lower().startswith('инкассация'):
-                start_row = idx + 1
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str) and 'инкассация' in cell.strip().lower():
+                    cash_col = col_idx
+                    start_row = row_idx + 1
+                    logger.info(f"Found 'Инкассация' at row {row_idx}, col {col_idx}")
+                    break
+            if cash_col is not None:
                 break
 
-        if start_row is None:
+        if cash_col is None:
             logger.info("Cash collection block header not found")
             return {}
 
+        # Пропускаем строку с заголовками (---, кол-во, курс, сумма)
         header_row = None
-        for row_idx in range(start_row, len(df)):
-            cells = [df.iloc[row_idx, col] if df.shape[1] > col else None for col in range(4)]
+        for row_idx in range(start_row, min(start_row + 3, len(df))):
+            cells = [df.iloc[row_idx, cash_col + i] if df.shape[1] > cash_col + i else None for i in range(4)]
             normalized = [str(cell).strip().lower() if cell is not None and not (isinstance(cell, float) and pd.isna(cell)) else '' for cell in cells]
 
-            if any('кол' in cell for cell in normalized) and any('курс' in cell for cell in normalized) and any('сумм' in cell for cell in normalized):
-                header_row = row_idx
+            if any('кол' in cell for cell in normalized) or any('курс' in cell for cell in normalized):
                 start_row = row_idx + 1
-                break
-
-            # Если первая не пустая строка после заголовка — данные
-            if normalized[0]:
-                header_row = None
-                start_row = row_idx
+                logger.info(f"Found header row at {row_idx}, data starts at {start_row}")
                 break
 
         records: List[Dict[str, Any]] = []
         calculated_total = Decimal('0.00')
         reported_total = None
 
+        # Формат: cash_col - валюта, cash_col+1 - количество, cash_col+2 - курс, cash_col+3 - сумма
         for row_idx in range(start_row, len(df)):
-            currency_cell = df.iloc[row_idx, 0] if df.shape[1] > 0 else None
-            quantity_cell = df.iloc[row_idx, 1] if df.shape[1] > 1 else None
-            rate_cell = df.iloc[row_idx, 2] if df.shape[1] > 2 else None
-            amount_cell = df.iloc[row_idx, 3] if df.shape[1] > 3 else None
+            currency_cell = df.iloc[row_idx, cash_col] if df.shape[1] > cash_col else None
+            quantity_cell = df.iloc[row_idx, cash_col + 1] if df.shape[1] > cash_col + 1 else None
+            rate_cell = df.iloc[row_idx, cash_col + 2] if df.shape[1] > cash_col + 2 else None
+            amount_cell = df.iloc[row_idx, cash_col + 3] if df.shape[1] > cash_col + 3 else None
 
-            if currency_cell is None and amount_cell is None:
+            # Пропускаем пустые строки, ищем ИТОГО
+            if currency_cell is None or (isinstance(currency_cell, float) and pd.isna(currency_cell)):
+                # Проверяем следующие несколько строк на наличие ИТОГО
+                found_total = False
+                for offset in range(1, 8):
+                    if row_idx + offset >= len(df):
+                        break
+                    next_cell = df.iloc[row_idx + offset, cash_col] if df.shape[1] > cash_col else None
+                    if next_cell is not None and isinstance(next_cell, str) and 'итого' in next_cell.strip().lower():
+                        # Нашли ИТОГО, продолжаем парсинг с этой строки
+                        found_total = True
+                        break
+                if not found_total:
+                    break
+                else:
+                    continue
+
+            # Если в колонке валюты число - это другой блок
+            if isinstance(currency_cell, (int, float)):
+                logger.info(f"Row {row_idx}: col {cash_col} contains number, stopping cash parsing")
                 break
 
-            label = str(currency_cell).strip() if currency_cell is not None and not (isinstance(currency_cell, float) and pd.isna(currency_cell)) else ''
-
+            label = str(currency_cell).strip()
             if not label:
-                if amount_cell is None or (isinstance(amount_cell, float) and pd.isna(amount_cell)):
-                    break
                 continue
 
             normalized_label = label.lower()
-
             is_total = 'итого' in normalized_label
 
             quantity = None if is_total else self._parse_decimal(quantity_cell)
             rate = None if is_total else self._parse_decimal(rate_cell)
             amount = self._parse_decimal(amount_cell)
 
+            # Вычисляем сумму, если не указана
             if not is_total and (amount is None or amount == Decimal('0.00')) and quantity is not None and rate is not None:
                 amount = (quantity * rate).quantize(Decimal('0.01'))
+
+            logger.info(f"Cash: currency='{label}', qty={quantity}, rate={rate}, amount={amount}, is_total={is_total}")
 
             records.append({
                 'currency_label': label,
@@ -853,7 +875,7 @@ class ExcelProcessor:
         }
 
     def extract_staff_debts(self, file_content: bytes) -> Dict[str, Any]:
-        """Извлечение блока «Долги по персоналу»"""
+        """Извлечение блока «Долги по персоналу» - идет после инкассации БЕЗ заголовка"""
         try:
             df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='openpyxl')
         except Exception as e:
@@ -863,56 +885,82 @@ class ExcelProcessor:
         if df.empty:
             return {}
 
-        patterns = [
-            'долг нал общ',
-            'долг бн',
-            'итого'
-        ]
+        # Ищем ИТОГО инкассации, блок долгов идет сразу после него
+        cash_itogo_row = None
+        cash_col = None
+        
+        # Сначала ищем блок "Инкассация"
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str) and 'инкассация' in cell.strip().lower():
+                    # Нашли заголовок инкассации, ищем ИТОГО через 5-15 строк после него
+                    for offset in range(5, 15):
+                        if row_idx + offset >= len(df):
+                            break
+                        itogo_cell = df.iloc[row_idx + offset, col_idx] if df.shape[1] > col_idx else None
+                        if itogo_cell and isinstance(itogo_cell, str) and 'итого' in itogo_cell.strip().lower():
+                            # Проверяем, что справа есть сумма
+                            amount_cell = df.iloc[row_idx + offset, col_idx + 3] if df.shape[1] > col_idx + 3 else None
+                            if amount_cell is not None and isinstance(amount_cell, (int, float)):
+                                cash_itogo_row = row_idx + offset
+                                cash_col = col_idx
+                                logger.info(f"Found cash ИТОГО at row {cash_itogo_row}, col {cash_col}, debts start after")
+                                break
+                    if cash_itogo_row is not None:
+                        break
+            if cash_itogo_row is not None:
+                break
 
-        matched_rows = []
-        for idx, value in enumerate(df.iloc[:, 0]):
-            if not isinstance(value, str):
-                continue
-            text = value.strip().lower()
-            if text in patterns and len(matched_rows) < 3:
-                expected = patterns[len(matched_rows)]
-                if text == expected:
-                    matched_rows.append(idx)
-                else:
-                    matched_rows = []
-
-                if len(matched_rows) == 3:
-                    break
-
-        if len(matched_rows) != 3:
-            logger.info("Staff debts block rows not all found")
+        if cash_itogo_row is None:
+            logger.info("Staff debts block not found (no cash ИТОГО found)")
             return {}
 
-        records: List[Dict[str, Any]] = []
+        # Блок долгов начинается через 1-2 строки после ИТОГО инкассации
+        start_row = cash_itogo_row + 2
+        records = []
         calculated_total = Decimal('0.00')
+        reported_total = None
 
-        for idx, pattern in zip(matched_rows, patterns):
-            debt_type_cell = df.iloc[idx, 0]
-            amount_cell = df.iloc[idx, 1] if df.shape[1] > 1 else None
+        # Формат: cash_col - тип долга, cash_col+1 - сумма
+        for row_idx in range(start_row, min(start_row + 10, len(df))):
+            debt_type_cell = df.iloc[row_idx, cash_col] if df.shape[1] > cash_col else None
+            amount_cell = df.iloc[row_idx, cash_col + 1] if df.shape[1] > cash_col + 1 else None
+
+            # Останавливаемся на пустой строке
+            if debt_type_cell is None or (isinstance(debt_type_cell, float) and pd.isna(debt_type_cell)):
+                break
+
+            # Если число в колонке типа - это другой блок
+            if isinstance(debt_type_cell, (int, float)):
+                break
+
+            debt_type = str(debt_type_cell).strip()
+            if not debt_type:
+                break
+
             amount = self._parse_decimal(amount_cell)
+            is_total = 'итого' in debt_type.lower()
 
-            if pattern == 'итого':
-                records.append({
-                    'debt_type': 'Итого',
-                    'amount': amount,
-                    'is_total': True
-                })
+            logger.info(f"Debt: type='{debt_type}', amount={amount}, is_total={is_total}")
+
+            records.append({
+                'debt_type': debt_type,
+                'amount': amount,
+                'is_total': is_total
+            })
+
+            if is_total:
                 reported_total = amount
+                break
             else:
-                records.append({
-                    'debt_type': str(debt_type_cell).strip(),
-                    'amount': amount,
-                    'is_total': False
-                })
                 calculated_total += amount
 
         if not records:
             return {}
+
+        if reported_total is None:
+            reported_total = calculated_total
 
         totals_match = (reported_total - calculated_total).copy_abs() <= Decimal('0.01')
 
@@ -934,20 +982,29 @@ class ExcelProcessor:
         if df.empty:
             return {}
 
+        # Ищем заголовок "Примечания" в любой колонке
         start_row = None
-        for idx, value in enumerate(df.iloc[:, 0]):
-            if isinstance(value, str) and value.strip().lower().startswith('примечание'):
-                start_row = idx + 1
+        notes_col = None
+        
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str) and 'примечан' in cell.strip().lower():
+                    start_row = row_idx + 1
+                    notes_col = col_idx
+                    logger.info(f"Found 'Примечания' at row {row_idx}, col {col_idx}")
+                    break
+            if start_row is not None:
                 break
 
-        if start_row is None:
+        if start_row is None or notes_col is None:
             logger.info("Notes block header not found")
             return {}
 
         column_headers_row = None
         for row_idx in range(start_row, len(df)):
-            left_cell = df.iloc[row_idx, 0] if df.shape[1] > 0 else None
-            right_cell = df.iloc[row_idx, 1] if df.shape[1] > 1 else None
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            right_cell = df.iloc[row_idx, notes_col + 1] if df.shape[1] > notes_col + 1 else None
 
             if left_cell is None and right_cell is None:
                 continue
@@ -955,9 +1012,10 @@ class ExcelProcessor:
             left_text = str(left_cell).strip().lower() if left_cell is not None else ''
             right_text = str(right_cell).strip().lower() if right_cell is not None else ''
 
-            if 'долг безнал' in left_text or 'долг нал' in right_text:
+            if 'долг' in left_text or 'долг' in right_text:
                 column_headers_row = row_idx
                 start_row = row_idx + 1
+                logger.info(f"Found debt headers at row {row_idx}, data starts at {start_row}")
                 break
             else:
                 column_headers_row = row_idx
@@ -972,8 +1030,8 @@ class ExcelProcessor:
         right_done = False
 
         for row_idx in range(start_row, len(df)):
-            left_cell = df.iloc[row_idx, 0] if df.shape[1] > 0 else None
-            right_cell = df.iloc[row_idx, 1] if df.shape[1] > 1 else None
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            right_cell = df.iloc[row_idx, notes_col + 1] if df.shape[1] > notes_col + 1 else None
 
             if left_cell is None and right_cell is None:
                 continue
@@ -983,6 +1041,11 @@ class ExcelProcessor:
 
             left_lower = left_text.lower()
             right_lower = right_text.lower()
+            
+            # Останавливаемся если встречаем слова "доход", "расход", "прибыль" - это итоговый баланс
+            if any(word in left_lower or word in right_lower for word in ['доход', 'расход', 'прибыль']):
+                logger.info(f"Found balance keywords at row {row_idx}, stopping notes parsing")
+                break
 
             processed_left = False
             processed_right = False
@@ -1043,7 +1106,7 @@ class ExcelProcessor:
         }
 
     def extract_totals_summary(self, file_content: bytes) -> List[Dict[str, Any]]:
-        """Извлечение блока «Итого»"""
+        """Извлечение блока «Итоговый баланс» - горизонтальный формат"""
         try:
             df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='openpyxl')
         except Exception as e:
@@ -1053,51 +1116,53 @@ class ExcelProcessor:
         if df.empty:
             return []
 
+        # Ищем строку с заголовками "Доход", "Расход", "Чистая прибыль"
+        balance_col = None
         start_row = None
-        for idx, value in enumerate(df.iloc[:, 0]):
-            if isinstance(value, str) and value.strip().lower().startswith('итого'):
-                start_row = idx + 1
+        
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str) and 'доход' in cell.strip().lower():
+                    # Проверяем, что справа есть "Расход"
+                    next_cell = df.iloc[row_idx, col_idx + 1] if df.shape[1] > col_idx + 1 else None
+                    if next_cell and isinstance(next_cell, str) and 'расход' in next_cell.strip().lower():
+                        balance_col = col_idx - 1  # Колонка с типом оплаты (левее "Дохода")
+                        start_row = row_idx + 1
+                        logger.info(f"Found totals header at row {row_idx}, col {col_idx}, data starts at {start_row}")
+                        break
+            if start_row is not None:
                 break
 
-        if start_row is None:
+        if start_row is None or balance_col is None:
             logger.info("Totals summary block header not found")
             return []
-
-        header_row = None
-        for row_idx in range(start_row, len(df)):
-            cells = [df.iloc[row_idx, col] if df.shape[1] > col else None for col in range(4)]
-            normalized = [str(cell).strip().lower() if cell is not None and not (isinstance(cell, float) and pd.isna(cell)) else '' for cell in cells]
-
-            if 'доход' in normalized[1] and 'расход' in normalized[2] and 'чистая' in normalized[3]:
-                header_row = row_idx
-                start_row = row_idx + 1
-                break
-
-            if normalized[0]:
-                header_row = None
-                start_row = row_idx
-                break
 
         expected_types = ['наличные', 'б/н', 'итого']
         records: List[Dict[str, Any]] = []
 
-        for row_idx in range(start_row, min(start_row + 3, len(df))):
-            type_cell = df.iloc[row_idx, 0] if df.shape[1] > 0 else None
-            income_cell = df.iloc[row_idx, 1] if df.shape[1] > 1 else None
-            expense_cell = df.iloc[row_idx, 2] if df.shape[1] > 2 else None
-            net_cell = df.iloc[row_idx, 3] if df.shape[1] > 3 else None
+        # Формат: balance_col - тип оплаты, balance_col+1 - доход, balance_col+2 - расход, balance_col+3 - чистая прибыль
+        for row_idx in range(start_row, min(start_row + 5, len(df))):
+            type_cell = df.iloc[row_idx, balance_col] if df.shape[1] > balance_col else None
+            income_cell = df.iloc[row_idx, balance_col + 1] if df.shape[1] > balance_col + 1 else None
+            expense_cell = df.iloc[row_idx, balance_col + 2] if df.shape[1] > balance_col + 2 else None
+            net_cell = df.iloc[row_idx, balance_col + 3] if df.shape[1] > balance_col + 3 else None
 
             if type_cell is None or (isinstance(type_cell, float) and pd.isna(type_cell)):
                 break
 
             payment_type = str(type_cell).strip()
             lower_type = payment_type.lower()
+            
+            # Проверяем только если это ожидаемый тип
             if lower_type not in expected_types:
                 break
 
             income = self._parse_decimal(income_cell)
             expense = self._parse_decimal(expense_cell)
             net = self._parse_decimal(net_cell)
+
+            logger.info(f"Totals: type='{payment_type}', income={income}, expense={expense}, net={net}")
 
             records.append({
                 'payment_type': payment_type,

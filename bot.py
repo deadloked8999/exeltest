@@ -393,10 +393,17 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Количество': rec['staff_count']
             })
             total_staff += rec['staff_count'] or 0
+        
+        # Добавляем ИТОГО в Excel
+        display_rows.append({
+            'Должность': 'ИТОГО',
+            'Количество': total_staff
+        })
+        
         lines.append(f"Всего персонала: {total_staff}")
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel(display_rows, file_name="staff.xlsx")
-        await target_message.reply_document(excel_bytes, filename=f"персонал_{report_date.isoformat()}.xlsx")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Статистика персонала")
+        await target_message.reply_document(excel_bytes, filename=f"персонал_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
         return
 
     if block_id == 'expenses':
@@ -434,20 +441,39 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             return
         lines = [f"🏦 Инкассация ({format_report_date(report_date)}):"]
         display_rows = []
+        total_amount = Decimal('0')
+        
         for rec in records:
-            lines.append(
-                f"• {rec['currency_label']}: количество {rec.get('quantity') or 0}, "
-                f"курс {decimal_to_str(rec.get('exchange_rate'))}, сумма {decimal_to_str(rec['amount'])}"
-            )
-            display_rows.append({
-                'Валюта': rec['currency_label'],
-                'Количество': rec.get('quantity'),
-                'Курс': decimal_to_float(rec.get('exchange_rate')),
-                'Сумма': decimal_to_float(rec['amount'])
-            })
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это строка ИТОГО
+                total_amount = rec['amount']
+                display_rows.append({
+                    'Валюта': rec['currency_label'],
+                    'Количество': None,
+                    'Курс': None,
+                    'Сумма': decimal_to_float(rec['amount'])
+                })
+            else:
+                lines.append(
+                    f"• {rec['currency_label']}: количество {rec.get('quantity') or 0}, "
+                    f"курс {decimal_to_str(rec.get('exchange_rate'))}, сумма {decimal_to_str(rec['amount'])}"
+                )
+                display_rows.append({
+                    'Валюта': rec['currency_label'],
+                    'Количество': rec.get('quantity'),
+                    'Курс': decimal_to_float(rec.get('exchange_rate')),
+                    'Сумма': decimal_to_float(rec['amount'])
+                })
+        
+        # Добавляем итого в предпросмотр
+        if total_amount > 0:
+            lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
+        
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel(display_rows, file_name="cash_collection.xlsx")
-        await target_message.reply_document(excel_bytes, filename=f"инкассация_{report_date.isoformat()}.xlsx")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Инкассация")
+        await target_message.reply_document(excel_bytes, filename=f"инкассация_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
         return
 
     if block_id == 'debts':
@@ -457,15 +483,32 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             return
         lines = [f"📌 Долги по персоналу ({format_report_date(report_date)}):"]
         display_rows = []
+        total_amount = Decimal('0')
+        
         for rec in records:
-            lines.append(f"• {rec['debt_type']}: {decimal_to_str(rec['amount'])}")
-            display_rows.append({
-                'Тип долга': rec['debt_type'],
-                'Сумма': decimal_to_float(rec['amount'])
-            })
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                total_amount = rec['amount']
+                # Добавляем ИТОГО в Excel
+                display_rows.append({
+                    'Тип долга': rec['debt_type'],
+                    'Сумма': decimal_to_float(rec['amount'])
+                })
+            else:
+                lines.append(f"• {rec['debt_type']}: {decimal_to_str(rec['amount'])}")
+                display_rows.append({
+                    'Тип долга': rec['debt_type'],
+                    'Сумма': decimal_to_float(rec['amount'])
+                })
+        
+        # Добавляем итого в предпросмотр
+        if total_amount > 0:
+            lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
+        
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel(display_rows, file_name="staff_debts.xlsx")
-        await target_message.reply_document(excel_bytes, filename=f"долги_{report_date.isoformat()}.xlsx")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Долги по персоналу")
+        await target_message.reply_document(excel_bytes, filename=f"долги_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
         return
 
     if block_id == 'notes':
@@ -473,23 +516,51 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет примечаний для этой даты.")
             return
+        
+        # Разделяем записи на две колонки (нал и безнал)
+        nal_records = [r for r in records if r['category'] == 'нал']
+        beznal_records = [r for r in records if r['category'] == 'безнал']
+        
         lines = [f"📝 Примечания ({format_report_date(report_date)}):"]
-        display_rows = []
-        for rec in records:
-            prefix = rec['category'].capitalize()
-            entry_text = rec['entry_text']
+        lines.append("\n💳 Долг безнал:")
+        for rec in beznal_records:
             if rec.get('is_total'):
-                lines.append(f"• {prefix} итого: {decimal_to_str(rec.get('amount'))}")
+                lines.append(f"  {rec['entry_text']}")
             else:
-                lines.append(f"• {prefix}: {entry_text}")
-            display_rows.append({
-                'Категория': rec['category'],
-                'Запись': entry_text,
-                'Сумма': decimal_to_float(rec.get('amount'))
-            })
+                lines.append(f"  • {rec['entry_text']}")
+        
+        lines.append("\n💵 Долг нал:")
+        for rec in nal_records:
+            if rec.get('is_total'):
+                lines.append(f"  {rec['entry_text']}")
+            else:
+                lines.append(f"  • {rec['entry_text']}")
+        
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel(display_rows, file_name="notes.xlsx")
-        await target_message.reply_document(excel_bytes, filename=f"примечания_{report_date.isoformat()}.xlsx")
+        
+        # Формируем Excel в две колонки КАК В ИСХОДНОМ ФАЙЛЕ
+        # ЛЕВАЯ колонка = Долг безнал, ПРАВАЯ = Долг нал
+        display_rows = []
+        max_len = max(len(beznal_records), len(nal_records))
+        
+        for i in range(max_len):
+            row = {}
+            # ЛЕВАЯ колонка - безнал
+            if i < len(beznal_records):
+                row['Долг безнал:'] = beznal_records[i]['entry_text']
+            else:
+                row['Долг безнал:'] = ''
+            
+            # ПРАВАЯ колонка - нал
+            if i < len(nal_records):
+                row['Долг нал:'] = nal_records[i]['entry_text']
+            else:
+                row['Долг нал:'] = ''
+            
+            display_rows.append(row)
+        
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Примечания")
+        await target_message.reply_document(excel_bytes, filename=f"примечания_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
         return
 
     if block_id == 'totals':
@@ -511,8 +582,8 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
                 'Чистая прибыль': decimal_to_float(rec['net_profit'])
             })
         await target_message.reply_text("\n".join(lines))
-        excel_bytes = excel_processor.export_to_excel(display_rows, file_name="totals.xlsx")
-        await target_message.reply_document(excel_bytes, filename=f"итого_{report_date.isoformat()}.xlsx")
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, "Итоговый баланс")
+        await target_message.reply_document(excel_bytes, filename=f"итого_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)}")
         return
 
     await target_message.reply_text("⚠️ Неизвестный блок.")
