@@ -326,6 +326,79 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_payment_types_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по типам оплат за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {payment_type: sum}
+    payment_summary = defaultdict(Decimal)
+    # Список для сохранения порядка типов оплат (берем из файла с максимумом типов)
+    payment_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные типы оплат из ВСЕХ файлов периода
+    all_payments_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_payment_types(file_id)
+        
+        file_payments = []
+        for rec in records:
+            payment_type = rec.get('payment_type')
+            amount = rec.get('amount') or Decimal('0')
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это итоговая строка - пропускаем, посчитаем сами
+                continue
+            
+            # Суммируем
+            payment_summary[payment_type] += amount
+            
+            # Запоминаем порядок для этого файла
+            if payment_type not in file_payments:
+                file_payments.append(payment_type)
+        
+        all_payments_by_file.append(file_payments)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом типов оплат
+    if all_payments_by_file:
+        payment_order = max(all_payments_by_file, key=len)
+    
+    # ШАГ 3: Добавляем типы, которые есть в других файлах, но нет в payment_order
+    for file_payments in all_payments_by_file:
+        for payment in file_payments:
+            if payment not in payment_order:
+                payment_order.append(payment)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    total_amount = Decimal('0')
+    
+    for payment_type in payment_order:
+        amt = payment_summary.get(payment_type, Decimal('0'))
+        total_amount += amt
+        
+        display_rows.append({
+            'Тип оплаты': payment_type,
+            'Сумма': decimal_to_float(amt)
+        })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Тип оплаты': 'ИТОГО',
+        'Сумма': decimal_to_float(total_amount)
+    })
+    
+    return display_rows, total_amount
+
+
 async def generate_tickets_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по входным билетам за период"""
     from collections import defaultdict
@@ -1424,7 +1497,46 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'tickets':
+            if block_id == 'payments':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по типам оплат...")
+                
+                result = await generate_payment_types_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_amount = result
+                
+                # Формируем предпросмотр
+                lines = [f"💳 Типы оплат за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    payment_type = row['Тип оплаты']
+                    amt = Decimal(str(row['Сумма']))
+                    
+                    if 'итого' in str(payment_type).lower():
+                        lines.append(f"\n📊 {payment_type}: {decimal_to_str(amt)}")
+                    else:
+                        lines.append(f"• {payment_type}: {decimal_to_str(amt)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Типы оплат"
+                )
+                
+                filename = f"типы_оплат_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Типы оплат\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
+            elif block_id == 'tickets':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по входным билетам...")
                 
                 result = await generate_tickets_period_report(club_name, start_date, end_date)
@@ -1868,6 +1980,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💰 Доходы", callback_data="report_block|income")],
             [InlineKeyboardButton("🎟 Входные билеты", callback_data="report_block|tickets")],
+            [InlineKeyboardButton("💳 Типы оплат", callback_data="report_block|payments")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -1890,7 +2003,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         
         block_names = {
             'income': 'Доходы',
-            'tickets': 'Входные билеты'
+            'tickets': 'Входные билеты',
+            'payments': 'Типы оплат'
         }
         block_name = block_names.get(block_id, block_id)
         
