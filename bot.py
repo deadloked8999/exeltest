@@ -326,6 +326,90 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_cash_collection_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по инкассации за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {(currency_label, exchange_rate): {'quantity': sum, 'amount': sum}}
+    cash_summary = defaultdict(lambda: {'quantity': 0, 'amount': Decimal('0')})
+    # Список для сохранения порядка (валюта, курс) пар
+    cash_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные пары (валюта + курс) из ВСЕХ файлов периода
+    all_cash_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_cash_collection(file_id)
+        
+        file_cash = []
+        for rec in records:
+            currency_label = rec.get('currency_label')
+            quantity = rec.get('quantity') or 0
+            exchange_rate = rec.get('exchange_rate') or Decimal('0')
+            amount = rec.get('amount') or Decimal('0')
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это итоговая строка - пропускаем, посчитаем сами
+                continue
+            
+            # Ключ: (валюта, курс)
+            key = (currency_label, exchange_rate)
+            
+            # Суммируем
+            cash_summary[key]['quantity'] += quantity
+            cash_summary[key]['amount'] += amount
+            
+            # Запоминаем порядок для этого файла
+            if key not in file_cash:
+                file_cash.append(key)
+        
+        all_cash_by_file.append(file_cash)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом записей
+    if all_cash_by_file:
+        cash_order = max(all_cash_by_file, key=len)
+    
+    # ШАГ 3: Добавляем пары, которые есть в других файлах, но нет в cash_order
+    for file_cash in all_cash_by_file:
+        for key in file_cash:
+            if key not in cash_order:
+                cash_order.append(key)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    total_amount = Decimal('0')
+    
+    for currency_label, exchange_rate in cash_order:
+        qty = cash_summary[(currency_label, exchange_rate)]['quantity']
+        amt = cash_summary[(currency_label, exchange_rate)]['amount']
+        total_amount += amt
+        
+        display_rows.append({
+            'Валюта': currency_label,
+            'Количество': qty,
+            'Курс': decimal_to_float(exchange_rate),
+            'Сумма': decimal_to_float(amt)
+        })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Валюта': 'ИТОГО',
+        'Количество': None,
+        'Курс': None,
+        'Сумма': decimal_to_float(total_amount)
+    })
+    
+    return display_rows, total_amount
+
+
 async def generate_expenses_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по расходам за период"""
     from collections import defaultdict
@@ -1638,7 +1722,51 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'expenses':
+            if block_id == 'cash':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по инкассации...")
+                
+                result = await generate_cash_collection_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_amount = result
+                
+                # Формируем предпросмотр
+                lines = [f"🏦 Инкассация за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    currency = row['Валюта']
+                    qty = row['Количество']
+                    rate = row['Курс']
+                    amt = row['Сумма']
+                    
+                    if 'итого' in str(currency).lower():
+                        lines.append(f"\n📊 {currency}: {decimal_to_str(Decimal(str(amt)))}")
+                    else:
+                        if qty is not None and rate is not None:
+                            lines.append(f"• {currency} (курс {decimal_to_str(Decimal(str(rate)))}): количество {qty}, сумма {decimal_to_str(Decimal(str(amt)))}")
+                        else:
+                            lines.append(f"• {currency}: {decimal_to_str(Decimal(str(amt)))}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Инкассация"
+                )
+                
+                filename = f"инкассация_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Инкассация\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
+            elif block_id == 'expenses':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по расходам...")
                 
                 result = await generate_expenses_period_report(club_name, start_date, end_date)
@@ -2202,6 +2330,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("💳 Типы оплат", callback_data="report_block|payments")],
             [InlineKeyboardButton("👥 Статистика персонала", callback_data="report_block|staff")],
             [InlineKeyboardButton("💸 Расходы", callback_data="report_block|expenses")],
+            [InlineKeyboardButton("🏦 Инкассация", callback_data="report_block|cash")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -2227,7 +2356,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             'tickets': 'Входные билеты',
             'payments': 'Типы оплат',
             'staff': 'Статистика персонала',
-            'expenses': 'Расходы'
+            'expenses': 'Расходы',
+            'cash': 'Инкассация'
         }
         block_name = block_names.get(block_id, block_id)
         
