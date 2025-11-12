@@ -326,6 +326,74 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_staff_statistics_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по статистике персонала за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {role_name: sum}
+    staff_summary = defaultdict(int)
+    # Список для сохранения порядка должностей (берем из файла с максимумом должностей)
+    role_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные должности из ВСЕХ файлов периода
+    all_roles_by_file = []
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_staff_statistics(file_id)
+        
+        file_roles = []
+        for rec in records:
+            role_name = rec.get('role_name')
+            staff_count = rec.get('staff_count') or 0
+            
+            # Суммируем
+            staff_summary[role_name] += staff_count
+            
+            # Запоминаем порядок для этого файла
+            if role_name not in file_roles:
+                file_roles.append(role_name)
+        
+        all_roles_by_file.append(file_roles)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом должностей
+    if all_roles_by_file:
+        role_order = max(all_roles_by_file, key=len)
+    
+    # ШАГ 3: Добавляем должности, которые есть в других файлах, но нет в role_order
+    for file_roles in all_roles_by_file:
+        for role in file_roles:
+            if role not in role_order:
+                role_order.append(role)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    total_count = 0
+    
+    for role_name in role_order:
+        count = staff_summary.get(role_name, 0)
+        total_count += count
+        
+        display_rows.append({
+            'Должность': role_name,
+            'Количество': count
+        })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Должность': 'ИТОГО',
+        'Количество': total_count
+    })
+    
+    return display_rows, total_count
+
+
 async def generate_payment_types_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по типам оплат за период"""
     from collections import defaultdict
@@ -1497,7 +1565,46 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         try:
             # Выбираем функцию генерации в зависимости от блока
-            if block_id == 'payments':
+            if block_id == 'staff':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по персоналу...")
+                
+                result = await generate_staff_statistics_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_count = result
+                
+                # Формируем предпросмотр
+                lines = [f"👥 Статистика персонала за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    role_name = row['Должность']
+                    count = row['Количество']
+                    
+                    if 'итого' in str(role_name).lower():
+                        lines.append(f"\n📊 {role_name}: {count}")
+                    else:
+                        lines.append(f"• {role_name}: {count}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Статистика персонала"
+                )
+                
+                filename = f"персонал_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Статистика персонала\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
+            elif block_id == 'payments':
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по типам оплат...")
                 
                 result = await generate_payment_types_period_report(club_name, start_date, end_date)
@@ -1981,6 +2088,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("💰 Доходы", callback_data="report_block|income")],
             [InlineKeyboardButton("🎟 Входные билеты", callback_data="report_block|tickets")],
             [InlineKeyboardButton("💳 Типы оплат", callback_data="report_block|payments")],
+            [InlineKeyboardButton("👥 Статистика персонала", callback_data="report_block|staff")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -2004,7 +2112,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         block_names = {
             'income': 'Доходы',
             'tickets': 'Входные билеты',
-            'payments': 'Типы оплат'
+            'payments': 'Типы оплат',
+            'staff': 'Статистика персонала'
         }
         block_name = block_names.get(block_id, block_id)
         
