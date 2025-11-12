@@ -727,6 +727,22 @@ class Database:
                 result = cur.fetchone()
                 return dict(result) if result else None
 
+    def get_files_by_period(self, start_date: date, end_date: date, club_name: str) -> List[Dict[str, Any]]:
+        """Получить все файлы за период для клуба"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM uploaded_files
+                    WHERE report_date >= %s AND report_date <= %s AND club_name = %s
+                    ORDER BY report_date ASC
+                    """,
+                    (start_date, end_date, club_name)
+                )
+                results = cur.fetchall()
+                return [dict(row) for row in results]
+
     def get_file_preview(self, file_id: int, limit: int = 10) -> List[Dict[str, Any]]:
         """Предпросмотр строк конкретного файла"""
         with self.get_connection() as conn:

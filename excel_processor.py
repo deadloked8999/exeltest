@@ -329,6 +329,40 @@ class ExcelProcessor:
             logger.error(f"Error exporting to Excel: {e}")
             raise ValueError(f"Не удалось экспортировать данные: {str(e)}")
     
+    def export_period_report_to_excel(self, data: List[Dict[str, Any]], club_name: str, start_date, end_date, block_name: str) -> bytes:
+        """Экспорт сводного отчета за период в Excel"""
+        try:
+            from datetime import date
+            from openpyxl.styles import Font
+            
+            df = pd.DataFrame(data)
+            
+            # Создание Excel файла в памяти
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Записываем данные, начиная со строки 3 (оставляем место для заголовка)
+                df.to_excel(writer, index=False, sheet_name='Data', startrow=2)
+                
+                # Получаем worksheet для добавления заголовка
+                worksheet = writer.sheets['Data']
+                
+                # Добавляем заголовок
+                worksheet['A1'] = f'Клуб: {club_name}'
+                worksheet['A1'].font = Font(bold=True, size=12)
+                
+                # Форматируем период
+                start_str = start_date.strftime("%d.%m.%Y") if isinstance(start_date, date) else str(start_date)
+                end_str = end_date.strftime("%d.%m.%Y") if isinstance(end_date, date) else str(end_date)
+                worksheet['B1'] = f'Период: {start_str} - {end_str}'
+                worksheet['B1'].font = Font(bold=True, size=12)
+            
+            output.seek(0)
+            return output.getvalue()
+        
+        except Exception as e:
+            logger.error(f"Error exporting period report to Excel: {e}")
+            raise ValueError(f"Не удалось экспортировать данные: {str(e)}")
+
     def export_to_excel_with_header(self, data: List[Dict[str, Any]], report_date, block_name: str, club_name: str = None) -> bytes:
         """Экспорт данных в Excel с заголовком (дата, клуб и название блока)"""
         try:

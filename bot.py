@@ -81,6 +81,7 @@ employee_parser = EmployeeParser()
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 BUTTON_FILES = "📁 Файлы"
 BUTTON_QUERIES = "📊 Запросы"
+BUTTON_REPORTS = "📈 Сформировать отчет"
 BUTTON_EMPLOYEES = "👥 Сотрудники"
 BUTTON_HELP = "ℹ️ Помощь"
 DATE_FORMATS = ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"]
@@ -110,6 +111,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(BUTTON_FILES), KeyboardButton(BUTTON_QUERIES)],
+        [KeyboardButton(BUTTON_REPORTS)],
         [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_HELP)]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -169,6 +171,58 @@ def get_blocks_keyboard(report_date: date) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton("⬅️ К выбору клуба", callback_data="main_queries")])
     keyboard.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
+
+
+def parse_period_from_text(text: str) -> Optional[tuple[date, date]]:
+    """Парсинг периода из текста типа '1.11-5.12' или '1,11-5,12'"""
+    try:
+        from datetime import datetime
+        current_year = datetime.now().year
+        
+        # Заменяем запятые на точки и убираем пробелы
+        text = text.replace(',', '.').replace(' ', '')
+        
+        # Разделяем по дефису
+        if '-' not in text:
+            return None
+        
+        parts = text.split('-')
+        if len(parts) != 2:
+            return None
+        
+        start_str, end_str = parts
+        
+        # Парсим начальную дату
+        if '.' in start_str:
+            start_parts = start_str.split('.')
+            if len(start_parts) == 2:
+                start_day, start_month = int(start_parts[0]), int(start_parts[1])
+                start_date = date(current_year, start_month, start_day)
+            else:
+                return None
+        else:
+            return None
+        
+        # Парсим конечную дату
+        if '.' in end_str:
+            end_parts = end_str.split('.')
+            if len(end_parts) == 2:
+                end_day, end_month = int(end_parts[0]), int(end_parts[1])
+                end_date = date(current_year, end_month, end_day)
+            else:
+                return None
+        else:
+            return None
+        
+        # Проверяем корректность периода
+        if start_date > end_date:
+            return None
+        
+        return (start_date, end_date)
+    
+    except Exception as e:
+        logger.error(f"Error parsing period: {e}")
+        return None
 
 
 def parse_report_date_from_text(text: str) -> Optional[date]:
@@ -269,6 +323,40 @@ async def send_employees_menu_message(target_message):
         "Выберите действие:",
         reply_markup=get_employees_keyboard()
     )
+
+
+async def generate_income_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по доходам за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {категория: сумма}
+    income_summary = defaultdict(Decimal)
+    
+    # Проходим по каждому файлу и суммируем доходы
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_income_records(file_id)
+        
+        for rec in records:
+            category = rec['category']
+            amount = rec['amount']
+            income_summary[category] += amount
+    
+    # Формируем список для вывода
+    display_rows = []
+    for category, total_amount in sorted(income_summary.items()):
+        display_rows.append({
+            'Категория': category,
+            'Сумма за период': decimal_to_float(total_amount)
+        })
+    
+    return display_rows
 
 
 async def send_queries_menu_message(target_message, context=None):
@@ -1191,12 +1279,84 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_queries_menu_message(update.message, context)
         return
 
+    if user_message.strip() == BUTTON_REPORTS:
+        # Начинаем процесс формирования отчета
+        await update.message.reply_text(
+            "📊 Формирование сводного отчета\n\n"
+            "Выберите клуб:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏢 Москвич", callback_data="report_club|Москвич")],
+                [InlineKeyboardButton("🌟 Анора", callback_data="report_club|Анора")],
+                [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+            ])
+        )
+        return
+
     if user_message.strip() == BUTTON_EMPLOYEES:
         await send_employees_menu_message(update.message)
         return
 
     if user_message.strip() == BUTTON_HELP:
         await update.message.reply_text(build_help_text(), parse_mode='Markdown')
+        return
+    
+    # Обработка ввода периода для отчета
+    if context.user_data.get('awaiting_report_period'):
+        club_name = context.user_data.get('report_club')
+        period = parse_period_from_text(user_message)
+        
+        if period is None:
+            await update.message.reply_text(
+                "❌ Неверный формат периода!\n\n"
+                "Используйте формат: 1.11-5.12 или 1,11-5,12\n"
+                "Попробуйте еще раз:"
+            )
+            return
+        
+        start_date, end_date = period
+        context.user_data.pop('awaiting_report_period', None)
+        
+        # Генерируем отчет
+        processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
+        
+        try:
+            report_data = await generate_income_period_report(club_name, start_date, end_date)
+            
+            if not report_data:
+                await processing_msg.edit_text(
+                    f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                )
+                return
+            
+            # Формируем предпросмотр
+            lines = [f"💰 Доходы за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):"]
+            total = Decimal('0')
+            
+            for row in report_data:
+                category = row['Категория']
+                amount = Decimal(str(row['Сумма за период']))
+                lines.append(f"• {category}: {decimal_to_str(amount)}")
+                if 'итого' not in category.lower():
+                    total += amount
+            
+            await processing_msg.edit_text("\n".join(lines))
+            
+            # Отправляем Excel файл
+            excel_bytes = excel_processor.export_period_report_to_excel(
+                report_data, club_name, start_date, end_date, "Доходы"
+            )
+            
+            filename = f"доходы_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+            await update.message.reply_document(
+                excel_bytes,
+                filename=filename,
+                caption=f"📊 Сводный отчет: Доходы\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+            )
+            
+        except Exception as e:
+            logger.error(f"Error generating report: {e}")
+            await processing_msg.edit_text(f"❌ Ошибка при формировании отчета: {str(e)}")
+        
         return
 
     if context.user_data.get('employee_action'):
@@ -1484,6 +1644,20 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data == "main_queries":
         await send_queries_menu_message(query.message, context)
+
+    elif data.startswith("report_club|"):
+        # Выбор клуба для формирования отчета
+        selected_club = data.split("|", 1)[1]
+        context.user_data['report_club'] = selected_club
+        context.user_data['awaiting_report_period'] = True
+        await query.answer(f"✅ Выбран: {selected_club}")
+        await query.message.reply_text(
+            f"🏢 Клуб: {selected_club}\n\n"
+            "📅 Введите период для отчета:\n\n"
+            "Формат: 1.11-5.12 или 1,11-5,12\n"
+            "(бот автоматически подставит текущий год)\n\n"
+            "Пример: 1.11-30.11"
+        )
 
     elif data.startswith("select_club|"):
         selected_club = data.split("|", 1)[1]
