@@ -327,7 +327,7 @@ async def send_employees_menu_message(target_message):
 
 async def generate_income_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по доходам за период"""
-    from collections import defaultdict
+    from collections import defaultdict, OrderedDict
     
     # Получаем все файлы за период
     files = db.get_files_by_period(start_date, end_date, club_name)
@@ -337,6 +337,9 @@ async def generate_income_period_report(club_name: str, start_date: date, end_da
     
     # Словарь для суммирования: {категория: сумма}
     income_summary = defaultdict(Decimal)
+    # Список для сохранения порядка категорий (из первого файла)
+    category_order = []
+    first_file = True
     
     # Проходим по каждому файлу и суммируем доходы
     for file_info in files:
@@ -346,15 +349,23 @@ async def generate_income_period_report(club_name: str, start_date: date, end_da
         for rec in records:
             category = rec['category']
             amount = rec['amount']
+            
+            # Запоминаем порядок категорий из первого файла
+            if first_file and category not in category_order:
+                category_order.append(category)
+            
             income_summary[category] += amount
+        
+        first_file = False
     
-    # Формируем список для вывода
+    # Формируем список для вывода В ПРАВИЛЬНОМ ПОРЯДКЕ (как в исходном файле)
     display_rows = []
-    for category, total_amount in sorted(income_summary.items()):
-        display_rows.append({
-            'Категория': category,
-            'Сумма за период': decimal_to_float(total_amount)
-        })
+    for category in category_order:
+        if category in income_summary:
+            display_rows.append({
+                'Категория': category,
+                'Сумма за период': decimal_to_float(income_summary[category])
+            })
     
     return display_rows
 

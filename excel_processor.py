@@ -355,6 +355,15 @@ class ExcelProcessor:
                 end_str = end_date.strftime("%d.%m.%Y") if isinstance(end_date, date) else str(end_date)
                 worksheet['B1'] = f'Период: {start_str} - {end_str}'
                 worksheet['B1'].font = Font(bold=True, size=12)
+                
+                # Делаем строки с "итого" жирными (и текст, и цифры)
+                bold_font = Font(bold=True, size=11)
+                for row_idx in range(3, worksheet.max_row + 1):  # Начинаем с 3-й строки (данные)
+                    cell_value = worksheet.cell(row=row_idx, column=1).value  # Колонка "Категория"
+                    if cell_value and isinstance(cell_value, str) and 'итого' in cell_value.lower():
+                        # Делаем жирным всю строку (категория + сумма)
+                        for col_idx in range(1, worksheet.max_column + 1):
+                            worksheet.cell(row=row_idx, column=col_idx).font = bold_font
             
             output.seek(0)
             return output.getvalue()
