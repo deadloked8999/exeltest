@@ -109,8 +109,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🏢 Москвич"), KeyboardButton("🌟 Анора")],
-        [KeyboardButton("📊 Оба клуба")]
+        [KeyboardButton(BUTTON_FILES), KeyboardButton(BUTTON_QUERIES)],
+        [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_HELP)]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -236,12 +236,13 @@ def decimal_to_float(value) -> Optional[float]:
 
 async def send_main_menu_message(target_message):
     await target_message.reply_text(
-        "🏢 Выберите клуб для работы:\n\n"
-        "• Москвич - работа с клубом Москвич\n"
-        "• Анора - работа с клубом Анора\n"  
-        "• Оба клуба - просмотр сводных отчетов\n\n"
-        "⚠️ Загрузка файлов доступна только при выборе конкретного клуба!",
+        "Главное меню. Используйте кнопки ниже для выбора раздела:",
         reply_markup=get_main_reply_keyboard()
+    )
+
+    await target_message.reply_text(
+        "Доступные действия:",
+        reply_markup=get_main_menu_keyboard()
     )
 
 
@@ -598,9 +599,9 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
 async def setup_bot_commands(application: Application):
     commands = [
         BotCommand("start", "Главное меню"),
-        BotCommand("files", "Управление файлами"),
-        BotCommand("queries", "Быстрые запросы"),
-        BotCommand("employees", "Работа с сотрудниками"),
+        BotCommand("moskvich", "🏢 Клуб Москвич"),
+        BotCommand("anora", "🌟 Клуб Анора"),
+        BotCommand("both", "📊 Оба клуба (просмотр)"),
         BotCommand("help", "Описание возможностей")
     ]
     await application.bot.set_my_commands(commands)
@@ -614,6 +615,55 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AUTHORIZED_USERS.discard(user_id)
     context.user_data.pop('authorized', None)
     await request_password(update.message, context)
+
+
+async def moskvich_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор клуба Москвич"""
+    if not user_is_authorized(update.effective_user.id, context):
+        await request_password(update.message, context)
+        return
+    
+    context.user_data['current_club'] = 'Москвич'
+    await update.message.reply_text(
+        "✅ Выбран клуб: Москвич\n\n"
+        "Теперь вы можете:\n"
+        "• Загружать отчеты для Москвича\n"
+        "• Просматривать данные Москвича по датам и блокам\n\n"
+        "Используйте кнопки меню для работы."
+    )
+
+
+async def anora_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выбор клуба Анора"""
+    if not user_is_authorized(update.effective_user.id, context):
+        await request_password(update.message, context)
+        return
+    
+    context.user_data['current_club'] = 'Анора'
+    await update.message.reply_text(
+        "✅ Выбран клуб: Анора\n\n"
+        "Теперь вы можете:\n"
+        "• Загружать отчеты для Аноры\n"
+        "• Просматривать данные Аноры по датам и блокам\n\n"
+        "Используйте кнопки меню для работы."
+    )
+
+
+async def both_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Режим просмотра обоих клубов"""
+    if not user_is_authorized(update.effective_user.id, context):
+        await request_password(update.message, context)
+        return
+    
+    context.user_data['current_club'] = 'Оба'
+    await update.message.reply_text(
+        "✅ Режим просмотра: Оба клуба\n\n"
+        "Вы можете просматривать сводные данные по обоим клубам.\n\n"
+        "⚠️ Загрузка файлов в этом режиме НЕДОСТУПНА!\n"
+        "Для загрузки выберите конкретный клуб:\n"
+        "• /moskvich - Москвич\n"
+        "• /anora - Анора"
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1113,42 +1163,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.pop('awaiting_report_date', None)
         await update.message.reply_text(
             f"🗓 Дата отчёта установлена: {format_report_date(report_date)}"
-        )
-        return
-
-    # Обработка выбора клуба
-    if user_message.strip() == "🏢 Москвич":
-        context.user_data['current_club'] = 'Москвич'
-        await update.message.reply_text(
-            "✅ Выбран клуб: Москвич\n\n"
-            "Теперь вы можете:\n"
-            "• Загружать отчеты для Москвича\n"
-            "• Просматривать данные Москвича по датам и блокам\n\n"
-            "Отправьте Excel файл для начала работы.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-
-    if user_message.strip() == "🌟 Анора":
-        context.user_data['current_club'] = 'Анора'
-        await update.message.reply_text(
-            "✅ Выбран клуб: Анора\n\n"
-            "Теперь вы можете:\n"
-            "• Загружать отчеты для Аноры\n"
-            "• Просматривать данные Аноры по датам и блокам\n\n"
-            "Отправьте Excel файл для начала работы.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return
-
-    if user_message.strip() == "📊 Оба клуба":
-        context.user_data['current_club'] = 'Оба'
-        await update.message.reply_text(
-            "✅ Режим просмотра: Оба клуба\n\n"
-            "Вы можете просматривать сводные данные по обоим клубам.\n\n"
-            "⚠️ Загрузка файлов в этом режиме НЕДОСТУПНА!\n"
-            "Для загрузки выберите конкретный клуб (Москвич или Анора).",
-            reply_markup=get_main_menu_keyboard()
         )
         return
 
@@ -1717,6 +1731,9 @@ def main():
     application.post_init = setup_bot_commands
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("moskvich", moskvich_command))
+    application.add_handler(CommandHandler("anora", anora_command))
+    application.add_handler(CommandHandler("both", both_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("files", files_command))
     application.add_handler(CommandHandler("queries", queries_command))
