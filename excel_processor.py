@@ -169,10 +169,6 @@ class ExcelProcessor:
                     records.append({'category': category, 'amount': amount})
                 break
             
-            # Пропускаем "плюс по кассе" (не останавливаемся, это часть блока доходов)
-            if category_upper == 'ПЛЮС ПО КАССЕ':
-                continue
-            
             # Ищем первое ЧИСЛО справа от категории (пропускаем пустые ячейки)
             amount = None
             for col_offset in range(1, 6):
@@ -200,9 +196,9 @@ class ExcelProcessor:
                 if category_upper == 'ВХОДНЫЕ БИЛЕТЫ':
                     logger.info(f"Found 'Входные билеты' without amount at row {row_idx}, stopping income parsing")
                     break
-                # Для других категорий без суммы - просто пропускаем
-                logger.info(f"No amount found for '{category}', skipping")
-                continue
+                # Для других категорий без суммы - сохраняем с нулевой суммой!
+                logger.info(f"No amount found for '{category}', saving with 0")
+                amount = Decimal('0')
             
             records.append({
                 'category': category,
