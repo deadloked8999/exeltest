@@ -326,6 +326,86 @@ async def send_employees_menu_message(target_message):
     )
 
 
+async def generate_tickets_period_report(club_name: str, start_date: date, end_date: date):
+    """Генерация сводного отчета по входным билетам за период"""
+    from collections import defaultdict
+    
+    # Получаем все файлы за период
+    files = db.get_files_by_period(start_date, end_date, club_name)
+    
+    if not files:
+        return None
+    
+    # Словарь для суммирования: {price_label: {'quantity': sum, 'amount': sum}}
+    tickets_summary = defaultdict(lambda: {'quantity': 0, 'amount': Decimal('0')})
+    # Список для сохранения порядка цен (берем из файла с максимумом цен)
+    price_order = []
+    
+    # ШАГ 1: Собираем ВСЕ уникальные цены из ВСЕХ файлов периода
+    all_prices_by_file = []
+    total_quantity = 0
+    total_amount = Decimal('0')
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_ticket_sales(file_id)
+        
+        file_prices = []
+        for rec in records:
+            price_label = rec.get('price_label')
+            quantity = rec.get('quantity') or 0
+            amount = rec.get('amount') or Decimal('0')
+            is_total = rec.get('is_total', False)
+            
+            if is_total:
+                # Это итоговая строка - пропускаем в суммировании, посчитаем сами
+                continue
+            
+            # Суммируем
+            tickets_summary[price_label]['quantity'] += quantity
+            tickets_summary[price_label]['amount'] += amount
+            
+            # Запоминаем порядок для этого файла
+            if price_label not in file_prices:
+                file_prices.append(price_label)
+        
+        all_prices_by_file.append(file_prices)
+    
+    # ШАГ 2: Выбираем порядок из файла с максимумом цен
+    if all_prices_by_file:
+        price_order = max(all_prices_by_file, key=len)
+    
+    # ШАГ 3: Добавляем цены, которые есть в других файлах, но нет в price_order
+    for file_prices in all_prices_by_file:
+        for price in file_prices:
+            if price not in price_order:
+                price_order.append(price)
+    
+    # ШАГ 4: Формируем список для вывода
+    display_rows = []
+    for price_label in price_order:
+        if price_label in tickets_summary:
+            qty = tickets_summary[price_label]['quantity']
+            amt = tickets_summary[price_label]['amount']
+            total_quantity += qty
+            total_amount += amt
+            
+            display_rows.append({
+                'Цена': price_label,
+                'Количество': qty,
+                'Сумма': decimal_to_float(amt)
+            })
+    
+    # Добавляем ИТОГО
+    display_rows.append({
+        'Цена': 'ИТОГО',
+        'Количество': total_quantity,
+        'Сумма': decimal_to_float(total_amount)
+    })
+    
+    return display_rows, total_quantity, total_amount
+
+
 async def generate_income_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по доходам за период"""
     from collections import defaultdict
@@ -1327,6 +1407,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Обработка ввода периода для отчета
     if context.user_data.get('awaiting_report_period'):
         club_name = context.user_data.get('report_club')
+        block_id = context.user_data.get('report_block', 'income')
         period = parse_period_from_text(user_message)
         
         if period is None:
@@ -1339,47 +1420,86 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         start_date, end_date = period
         context.user_data.pop('awaiting_report_period', None)
-        
-        # Генерируем отчет
-        processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
+        context.user_data.pop('report_block', None)
         
         try:
-            report_data = await generate_income_period_report(club_name, start_date, end_date)
-            
-            if not report_data:
-                await processing_msg.edit_text(
-                    f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+            # Выбираем функцию генерации в зависимости от блока
+            if block_id == 'tickets':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по входным билетам...")
+                
+                result = await generate_tickets_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, total_quantity, total_amount = result
+                
+                # Формируем предпросмотр
+                lines = [f"🎟 Входные билеты за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    price = row['Цена']
+                    qty = row['Количество']
+                    amt = Decimal(str(row['Сумма']))
+                    
+                    if 'итого' in str(price).lower():
+                        lines.append(f"\n📊 {price}: {qty} билетов, сумма {decimal_to_str(amt)}")
+                    else:
+                        lines.append(f"• {price}: количество {qty}, сумма {decimal_to_str(amt)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Входные билеты"
                 )
-                return
+                
+                filename = f"билеты_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Входные билеты\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
             
-            # Формируем предпросмотр
-            lines = [f"💰 Доходы за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):"]
-            total = Decimal('0')
-            
-            for row in report_data:
-                category = row['Категория']
-                amount = Decimal(str(row['Сумма за период']))
-                lines.append(f"• {category}: {decimal_to_str(amount)}")
-                if 'итого' not in category.lower():
-                    total += amount
-            
-            await processing_msg.edit_text("\n".join(lines))
-            
-            # Отправляем Excel файл
-            excel_bytes = excel_processor.export_period_report_to_excel(
-                report_data, club_name, start_date, end_date, "Доходы"
-            )
-            
-            filename = f"доходы_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
-            await update.message.reply_document(
-                excel_bytes,
-                filename=filename,
-                caption=f"📊 Сводный отчет: Доходы\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
-            )
+            else:  # income (по умолчанию)
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
+                
+                report_data = await generate_income_period_report(club_name, start_date, end_date)
+                
+                if not report_data:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                # Формируем предпросмотр
+                lines = [f"💰 Доходы за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):"]
+                
+                for row in report_data:
+                    category = row['Категория']
+                    amount = Decimal(str(row['Сумма за период']))
+                    lines.append(f"• {category}: {decimal_to_str(amount)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Доходы"
+                )
+                
+                filename = f"доходы_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Доходы\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
             
         except Exception as e:
             logger.error(f"Error generating report: {e}")
-            await processing_msg.edit_text(f"❌ Ошибка при формировании отчета: {str(e)}")
+            await update.message.reply_text(f"❌ Ошибка при формировании отчета: {str(e)}")
         
         return
 
@@ -1739,13 +1859,45 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await send_queries_menu_message(query.message, context)
 
     elif data.startswith("report_club|"):
-        # Выбор клуба для формирования отчета
+        # Выбор клуба для формирования отчета → предлагаем выбрать блок
         selected_club = data.split("|", 1)[1]
         context.user_data['report_club'] = selected_club
-        context.user_data['awaiting_report_period'] = True
         await query.answer(f"✅ Выбран: {selected_club}")
+        
+        # Показываем выбор блока
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💰 Доходы", callback_data="report_block|income")],
+            [InlineKeyboardButton("🎟 Входные билеты", callback_data="report_block|tickets")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+        ])
         await query.message.reply_text(
             f"🏢 Клуб: {selected_club}\n\n"
+            "📊 Выберите блок для отчета:",
+            reply_markup=keyboard
+        )
+    
+    elif data.startswith("report_block|"):
+        # Выбор блока отчета → просим ввести период
+        block_id = data.split("|", 1)[1]
+        club_name = context.user_data.get('report_club')
+        
+        if not club_name:
+            await query.message.reply_text("❌ Клуб не выбран. Начните заново.")
+            return
+        
+        context.user_data['report_block'] = block_id
+        context.user_data['awaiting_report_period'] = True
+        
+        block_names = {
+            'income': 'Доходы',
+            'tickets': 'Входные билеты'
+        }
+        block_name = block_names.get(block_id, block_id)
+        
+        await query.answer(f"✅ Блок: {block_name}")
+        await query.message.reply_text(
+            f"🏢 Клуб: {club_name}\n"
+            f"📊 Блок: {block_name}\n\n"
             "📅 Введите период для отчета:\n\n"
             "Формат: 1.11-5.12 или 1,11-5,12\n"
             "(бот автоматически подставит текущий год)\n\n"
