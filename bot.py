@@ -60,7 +60,7 @@ def set_authorized(user_id: int, context: ContextTypes.DEFAULT_TYPE):
 async def request_password(message, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_password'] = True
     await message.reply_text(
-        "🔐 Введите пароль для доступа к боту (по умолчанию 1801)",
+        "🔐 Введите пароль для доступа к боту.",
     )
 
 
@@ -602,37 +602,12 @@ async def setup_bot_commands(application: Application):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start"""
-    welcome_message = """
-👋 **Привет!** Я твой помощник для работы с данными.
-
-🧠 **Что я умею:**
-• Анализировать Excel и CSV файлы и сохранять их в PostgreSQL
-• Добавлять новые записи в базу по твоим словам
-• Удалять ненужные записи по описанию запроса
-• Отвечать на вопросы к данным естественным языком
-
-🛠 **Как начать:**
-1. Отправь Excel/CSV файл как документ — я загружу и разберу его.
-2. Спрашивай, что нужно найти: «Покажи продажи за март».
-3. Добавляй данные командами вроде «Запиши: клиент Иванов, сумма 5000».
-4. Удаляй записи: «Удали всех клиентов из Москвы», «Удалить последние загрузки».
-
-📋 **Полезные команды:**
-/myfiles — список загруженных файлов
-/schema — структура базы данных
-/help — подробная инструкция
-
-Готов к работе, просто напиши что нужно! 🚀
-"""
-    await update.message.reply_text(welcome_message, parse_mode='Markdown')
-
-    user_id = update.effective_user.id
-    if not user_is_authorized(user_id, context):
-        await request_password(update.message, context)
+    if not update.message:
         return
-
-    context.user_data.pop('awaiting_password', None)
-    await send_main_menu_message(update.message)
+    user_id = update.effective_user.id
+    AUTHORIZED_USERS.discard(user_id)
+    context.user_data.pop('authorized', None)
+    await request_password(update.message, context)
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -924,6 +899,9 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         db.save_excel_data(file_id, data)
 
+        # Собираем все сообщения о блоках в один список
+        summary_lines = []
+        
         income_records = excel_processor.extract_income_records(bytes(file_content))
         if income_records:
             db.save_income_records(file_id, income_records)
@@ -932,85 +910,37 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 None
             )
             if income_total is not None:
-                total_str = format(income_total, '0.2f')
-                await update.message.reply_text(
-                    f"💰 Блок 'Доходы' обработан. Итог за смену: {total_str}")
+                total_str = format(income_total, '0.0f')
+                summary_lines.append(f"💰 Блок 'Доходы' обработан. Итог за смену: {total_str}")
  
         ticket_sales_data = excel_processor.extract_ticket_sales(bytes(file_content))
         if ticket_sales_data.get('records'):
             db.save_ticket_sales(file_id, ticket_sales_data['records'])
 
-            if not ticket_sales_data.get('totals_match', True):
-                calc_amount = ticket_sales_data.get('calculated_amount') or Decimal('0.00')
-                reported_amount = ticket_sales_data.get('total_amount') or Decimal('0.00')
-                await update.message.reply_text(
-                    "⚠️ В блоке 'Входные билеты' сумма строк не совпадает с 'Итого'.\n"
-                    f"По строкам: {format(calc_amount, '0.2f')} | В строке 'Итого': {format(reported_amount, '0.2f')}"
-                )
-
             ticket_total_amount = ticket_sales_data.get('total_amount')
 
             if ticket_total_amount is not None:
-                tickets_total_str = format(ticket_total_amount, '0.2f')
-                income_entry_amount = None
-                if income_records:
-                    income_entry_amount = next(
-                        (record['amount'] for record in income_records if record['category'].strip().lower() == 'входные билеты'),
-                        None
-                    )
-
-                if income_entry_amount is not None:
-                    difference = ticket_total_amount - income_entry_amount
-                    if difference.copy_abs() > Decimal('0.01'):
-                        await update.message.reply_text(
-                            "⚠️ Расхождение между блоками 'Доходы' и 'Входные билеты'.\n"
-                            f"Доходы → 'Входные билеты': {format(income_entry_amount, '0.2f')}\n"
-                            f"Входные билеты → Итого: {tickets_total_str}"
-                        )
-
-                await update.message.reply_text(
-                    f"🎟 Блок 'Входные билеты' обработан. Итого сумма: {tickets_total_str}")
+                tickets_total_str = format(ticket_total_amount, '0.0f')
+                summary_lines.append(f"🎟 Блок 'Входные билеты' обработан. Итого сумма: {tickets_total_str}")
 
         payment_types_data = excel_processor.extract_payment_types(bytes(file_content))
         if payment_types_data.get('records'):
             db.save_payment_types(file_id, payment_types_data['records'])
 
-            if not payment_types_data.get('totals_match', True):
-                calc_total = payment_types_data.get('calculated_total') or Decimal('0.00')
-                reported_total = payment_types_data.get('reported_total') or Decimal('0.00')
-                await update.message.reply_text(
-                    "⚠️ В блоке 'Типы оплат' суммы строк не совпадают с 'ИТОГО'.\n"
-                    f"По строкам: {format(calc_total, '0.2f')} | 'ИТОГО': {format(reported_total, '0.2f')}"
-                )
-
             payment_total = payment_types_data.get('reported_total') or Decimal('0.00')
-            income_total = None
-
-            if income_records:
-                income_total = next(
-                    (record['amount'] for record in income_records if record['category'].strip().lower() == 'итого'),
-                    None
-                )
-
-            if income_total is not None and (payment_total - income_total).copy_abs() > Decimal('0.01'):
-                await update.message.reply_text(
-                    "⚠️ Расхождение между 'ИТОГО' в блоке 'Доходы' и 'Типы оплат'.\n"
-                    f"Доходы → Итого: {format(income_total, '0.2f')}\n"
-                    f"Типы оплат → Итого: {format(payment_total, '0.2f')}"
-                )
-
             cash_total = payment_types_data.get('cash_total')
+            
             msg_lines = ["💳 Блок 'Типы оплат' обработан."]
             if cash_total is not None:
-                msg_lines.append(f"Итого касса: {format(cash_total, '0.2f')}")
-            msg_lines.append(f"Итого: {format(payment_total, '0.2f')}")
-            await update.message.reply_text("\n".join(msg_lines))
+                msg_lines.append(f"Итого касса: {format(cash_total, '0.0f')}")
+            msg_lines.append(f"Итого: {format(payment_total, '0.0f')}")
+            summary_lines.append("\n".join(msg_lines))
 
         staff_stats = excel_processor.extract_staff_statistics(bytes(file_content))
         if staff_stats:
             db.save_staff_statistics(file_id, staff_stats)
             total_staff = sum(item.get('staff_count', 0) for item in staff_stats)
-            await update.message.reply_text(
+            summary_lines.append(
                 "👥 Блок 'Статистика персонала' обработан.\n"
                 f"Всего персонала на смене: {total_staff}"
             )
@@ -1018,14 +948,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expense_data = excel_processor.extract_expense_records(bytes(file_content))
         if expense_data.get('records'):
             db.save_expense_records(file_id, expense_data['records'])
-
-            if not expense_data.get('totals_match', True):
-                calc_total = expense_data.get('calculated_total') or Decimal('0.00')
-                reported_total = expense_data.get('reported_total') or Decimal('0.00')
-                await update.message.reply_text(
-                    "⚠️ В блоке 'Расходы' сумма строк не совпадает с 'Итого'.\n"
-                    f"По строкам: {format(calc_total, '0.2f')} | 'Итого': {format(reported_total, '0.2f')}"
-                )
 
             expenses_total = expense_data.get('reported_total') or Decimal('0.00')
             income_total = None
@@ -1036,30 +958,22 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             msg_lines = ["💸 Блок 'Расходы' обработан."]
-            msg_lines.append(f"Итого расходы: {format(expenses_total, '0.2f')}")
+            msg_lines.append(f"Итого расходы: {format(expenses_total, '0.0f')}")
 
             if income_total is not None:
                 balance = income_total - expenses_total
-                msg_lines.append(f"Финансовый результат (Итого доходы - Расходы): {format(balance, '0.2f')}")
+                msg_lines.append(f"Финансовый результат (Итого доходы - Расходы): {format(balance, '0.0f')}")
 
-            await update.message.reply_text("\n".join(msg_lines))
+            summary_lines.append("\n".join(msg_lines))
 
         staff_debts_data = excel_processor.extract_staff_debts(bytes(file_content))
         if staff_debts_data.get('records'):
             db.save_staff_debts(file_id, staff_debts_data['records'])
 
-            if not staff_debts_data.get('totals_match', True):
-                calc_total = staff_debts_data.get('calculated_total') or Decimal('0.00')
-                reported_total = staff_debts_data.get('reported_total') or Decimal('0.00')
-                await update.message.reply_text(
-                    "⚠️ В блоке 'Долги по персоналу' сумма строк не совпадает с 'Итого'.\n"
-                    f"По строкам: {format(calc_total, '0.2f')} | 'Итого': {format(reported_total, '0.2f')}"
-                )
-
             debts_total = staff_debts_data.get('reported_total') or Decimal('0.00')
-            await update.message.reply_text(
+            summary_lines.append(
                 "📌 Блок 'Долги по персоналу' обработан.\n"
-                f"Итого задолженность: {format(debts_total, '0.2f')}"
+                f"Итого задолженность: {format(debts_total, '0.0f')}"
             )
         else:
             staff_debts_data = {}
@@ -1068,18 +982,10 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cash_collection_data.get('records'):
             db.save_cash_collection(file_id, cash_collection_data['records'])
  
-            if not cash_collection_data.get('totals_match', True):
-                calc_total = cash_collection_data.get('calculated_total') or Decimal('0.00')
-                reported_total = cash_collection_data.get('reported_total') or Decimal('0.00')
-                await update.message.reply_text(
-                    "⚠️ В блоке 'Инкассация' сумма строк не совпадает с 'Итого'.\n"
-                    f"По строкам: {format(calc_total, '0.2f')} | 'Итого': {format(reported_total, '0.2f')}"
-                )
- 
             collection_total = cash_collection_data.get('reported_total') or Decimal('0.00')
-            await update.message.reply_text(
+            summary_lines.append(
                 "🏦 Блок 'Инкассация' обработан.\n"
-                f"Итого наличных после смены: {format(collection_total, '0.2f')}"
+                f"Итого наличных после смены: {format(collection_total, '0.0f')}"
             )
  
         notes_data = excel_processor.extract_notes_entries(bytes(file_content))
@@ -1113,59 +1019,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if notes_records:
                 db.save_notes_entries(file_id, notes_records)
 
-            msg_lines = ["📝 Блок 'Примечание' сохранён."]
-
-            if staff_debts_data.get('records'):
-                bn_debt = next((rec['amount'] for rec in staff_debts_data['records'] if 'бн' in rec['debt_type'].lower()), None)
-                cash_debt = next((rec['amount'] for rec in staff_debts_data['records'] if 'нал' in rec['debt_type'].lower()), None)
-
-                note_bn_total = next((entry['amount'] for entry in notes_data.get('безнал', []) if entry.get('is_total')), None)
-                note_cash_total = next((entry['amount'] for entry in notes_data.get('нал', []) if entry.get('is_total')), None)
-
-                mismatches = []
-                if bn_debt is not None and note_bn_total is not None and (bn_debt - note_bn_total).copy_abs() > Decimal('0.01'):
-                    mismatches.append(
-                        f"Безнал: долги {format(bn_debt, '0.2f')} ≠ примечания {format(note_bn_total, '0.2f')}"
-                    )
-                if cash_debt is not None and note_cash_total is not None and (cash_debt - note_cash_total).copy_abs() > Decimal('0.01'):
-                    mismatches.append(
-                        f"Нал: долги {format(cash_debt, '0.2f')} ≠ примечания {format(note_cash_total, '0.2f')}"
-                    )
-
-                if mismatches:
-                    msg_lines.append("⚠️ Несовпадение с блоком 'Долги по персоналу':")
-                    msg_lines.extend(mismatches)
-
-            await update.message.reply_text("\n".join(msg_lines))
+            summary_lines.append("📝 Блок 'Примечание' сохранён.")
 
         totals_summary = excel_processor.extract_totals_summary(bytes(file_content))
         if totals_summary:
             db.save_totals_summary(file_id, totals_summary)
+            summary_lines.append("📊 Блок 'Итого' обработан.")
 
-            mismatches = []
-            for entry in totals_summary:
-                p_type = entry['payment_type'].lower()
-                net = entry['net_profit']
-                income = entry['income_amount']
-                expense = entry['expense_amount']
-
-                expected_net = income - expense
-                if (expected_net - net).copy_abs() > Decimal('0.01'):
-                    mismatches.append(
-                        f"{entry['payment_type']}: чистая прибыль {format(net, '0.2f')} ≠ доход ({format(income, '0.2f')}) - расход ({format(expense, '0.2f')})"
-                    )
-
-            msg_lines = ["📊 Блок 'Итого' обработан."]
-            if mismatches:
-                msg_lines.append("⚠️ Обнаружены несоответствия:")
-                msg_lines.extend(mismatches)
-            await update.message.reply_text("\n".join(msg_lines))
-
-        # Отправка статистики
-        await processing_msg.edit_text(
-            f"✅ Файл успешно обработан и сохранен!\n\n{stats}",
-            parse_mode='Markdown'
-        )
+        # Отправка единого сообщения с итогами по всем блокам
+        final_summary = "✅ Файл успешно обработан и сохранен!\n\n" + "\n\n".join(summary_lines)
+        await processing_msg.edit_text(final_summary)
         
         if report_date is None:
             context.user_data['awaiting_report_date'] = {'file_id': file_id}
