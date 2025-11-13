@@ -500,9 +500,9 @@ async def generate_full_period_report(club_name: str, start_date: date, end_date
         all_blocks['Долги по персоналу'] = debts_result[0]
     
     # 8. Итоговый баланс
-    totals_data = await generate_totals_summary_period_report(club_name, start_date, end_date)
-    if totals_data:
-        all_blocks['Итоговый баланс'] = totals_data
+    totals_result = await generate_totals_summary_period_report(club_name, start_date, end_date)
+    if totals_result:
+        all_blocks['Итоговый баланс'] = totals_result[0]  # Берем только display_rows
     
     return all_blocks if all_blocks else None
 
@@ -532,6 +532,11 @@ async def generate_totals_summary_period_report(club_name: str, start_date: date
         file_payments = []
         for rec in records:
             payment_type = rec.get('payment_type')
+            
+            # ПРОПУСКАЕМ строку "Итого" - это не тип оплаты, а итоговая строка!
+            if payment_type and 'итого' in payment_type.lower():
+                continue
+            
             income_amount = rec.get('income_amount') or Decimal('0')
             expense_amount = rec.get('expense_amount') or Decimal('0')
             net_profit = rec.get('net_profit') or Decimal('0')
@@ -558,8 +563,6 @@ async def generate_totals_summary_period_report(club_name: str, start_date: date
             
             # Добавляем к расходам для соответствующего типа оплаты
             totals_summary[payment_type]['expense'] += amount
-            # Пересчитываем прибыль
-            totals_summary[payment_type]['profit'] = totals_summary[payment_type]['income'] - totals_summary[payment_type]['expense']
             
             # Запоминаем порядок
             if payment_type not in off_shift_payments:
@@ -577,8 +580,15 @@ async def generate_totals_summary_period_report(club_name: str, start_date: date
             if payment not in payment_order:
                 payment_order.append(payment)
     
-    # ШАГ 5: Формируем список для вывода
+    # ШАГ 5: ПЕРЕСЧИТЫВАЕМ прибыль для ВСЕХ типов оплаты (чтобы учесть прочие расходы)
+    for payment_type in totals_summary:
+        totals_summary[payment_type]['profit'] = totals_summary[payment_type]['income'] - totals_summary[payment_type]['expense']
+    
+    # ШАГ 6: Формируем список для вывода
     display_rows = []
+    total_income = Decimal('0')
+    total_expense = Decimal('0')
+    total_profit = Decimal('0')
     
     for payment_type in payment_order:
         income = totals_summary[payment_type]['income']
@@ -591,8 +601,21 @@ async def generate_totals_summary_period_report(club_name: str, start_date: date
             'Расход': decimal_to_float(expense),
             'Чистая прибыль': decimal_to_float(profit)
         })
+        
+        # Суммируем для итоговой строки
+        total_income += income
+        total_expense += expense
+        total_profit += profit
     
-    return display_rows
+    # Добавляем итоговую строку
+    display_rows.append({
+        'Тип оплаты': 'ИТОГО',
+        'Доход': decimal_to_float(total_income),
+        'Расход': decimal_to_float(total_expense),
+        'Чистая прибыль': decimal_to_float(total_profit)
+    })
+    
+    return display_rows, totals_summary
 
 
 async def generate_staff_debts_period_report(club_name: str, start_date: date, end_date: date):
@@ -2403,6 +2426,47 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     caption=f"📊 Сводный отчет: Входные билеты\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
                 )
             
+            elif block_id == 'totals':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по итоговому балансу...")
+                
+                result = await generate_totals_summary_period_report(club_name, start_date, end_date)
+                
+                if not result:
+                    await processing_msg.edit_text(
+                        f"📭 Нет данных за период {format_report_date(start_date)} - {format_report_date(end_date)}"
+                    )
+                    return
+                
+                report_data, totals_by_type = result
+                
+                # Формируем предпросмотр
+                lines = [f"📊 Итоговый баланс за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                for row in report_data:
+                    payment_type = row['Тип оплаты']
+                    income = Decimal(str(row['Доход']))
+                    expense = Decimal(str(row['Расход']))
+                    profit = Decimal(str(row['Чистая прибыль']))
+                    
+                    lines.append(
+                        f"• {payment_type}: доход {decimal_to_str(income)}, "
+                        f"расход {decimal_to_str(expense)}, чистая прибыль {decimal_to_str(profit)}"
+                    )
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Отправляем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Итоговый баланс"
+                )
+                
+                filename = f"итоговый_баланс_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Итоговый баланс\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
             else:  # income (по умолчанию)
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
                 
@@ -2823,6 +2887,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("💸 Расходы", callback_data="report_block|expenses")],
             [InlineKeyboardButton("🏦 Инкассация", callback_data="report_block|cash")],
             [InlineKeyboardButton("📌 Долги по персоналу", callback_data="report_block|debts")],
+            [InlineKeyboardButton("📊 Итоговый баланс", callback_data="report_block|totals")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
