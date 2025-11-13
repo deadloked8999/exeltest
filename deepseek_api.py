@@ -4,7 +4,9 @@
 import openai
 import logging
 import json
+import base64
 from typing import Dict, Any, Optional, Tuple
+from decimal import Decimal
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -299,5 +301,104 @@ class DeepSeekAPI:
             formatted += f"📝 Показано {len(results)} из {total_count} записей\n"
         
         return formatted
+    
+    def parse_receipt_from_text(self, text: str) -> Dict[str, Any]:
+        """
+        Парсинг чека/платежного поручения из текста с использованием DeepSeek Chat API
+        
+        Args:
+            text: Текст из PDF документа
+        
+        Returns:
+            Dict с результатом: {'success': bool, 'recipient': str, 'amount': Decimal, 'error': str}
+        """
+        try:
+            system_prompt = """Ты - эксперт по анализу финансовых документов. 
+Твоя задача - извлечь из текста чека или платежного поручения:
+1. Получателя платежа (название организации/ИП)
+2. Сумму платежа
+
+Правила:
+- Ищи получателя в полях: "Получатель", "Наименование получателя", "Контрагент", или после "ИНН"
+- Сумма обычно указана в полях: "Сумма", "Сумма прописью", "Итого", "К оплате", "Списано"
+- Если есть несколько сумм, выбирай ту, которая указана как основная сумма платежа
+- Возвращай ТОЛЬКО JSON без дополнительного текста и markdown:
+{
+    "recipient": "Название организации",
+    "amount": "1234.56"
+}
+
+Если не удалось найти данные, верни:
+{
+    "error": "Описание проблемы"
+}"""
+
+            user_prompt = f"""Извлеки из этого текста платежного документа получателя и сумму платежа:
+
+{text}
+
+Верни результат в формате JSON."""
+            
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=500
+            )
+            
+            content = response.choices[0].message.content.strip()
+            logger.info(f"DeepSeek response: {content}")
+            
+            # Парсинг JSON ответа
+            if content.startswith("```json"):
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif content.startswith("```"):
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(content)
+            
+            if 'error' in result:
+                logger.warning(f"DeepSeek error: {result['error']}")
+                return {
+                    'success': False,
+                    'error': result['error']
+                }
+            
+            recipient = result.get('recipient', '').strip()
+            amount_str = result.get('amount', '').strip()
+            
+            if not recipient or not amount_str:
+                return {
+                    'success': False,
+                    'error': 'Не удалось извлечь получателя или сумму из документа'
+                }
+            
+            # Конвертируем сумму в Decimal
+            amount_str = amount_str.replace(',', '.').replace(' ', '')
+            amount = Decimal(amount_str)
+            
+            logger.info(f"Successfully parsed: recipient={recipient}, amount={amount}")
+            
+            return {
+                'success': True,
+                'recipient': recipient,
+                'amount': amount
+            }
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}, content: {content}")
+            return {
+                'success': False,
+                'error': 'Ошибка парсинга ответа от DeepSeek'
+            }
+        except Exception as e:
+            logger.error(f"Error in parse_receipt_from_text: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': f'Ошибка обработки текста: {str(e)}'
+            }
 
 

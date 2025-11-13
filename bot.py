@@ -84,7 +84,7 @@ BUTTON_QUERIES = "📊 Запросы"
 BUTTON_REPORTS = "📈 Сформировать отчет"
 BUTTON_EMPLOYEES = "👥 Сотрудники"
 BUTTON_EXPENSE = "💸 Добавить расходы"
-BUTTON_HELP = "ℹ️ Помощь"
+BUTTON_OFF_SHIFT_EXPENSES = "📋 Расходы вне смены"
 DATE_FORMATS = ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"]
 QUERY_BLOCKS = [
     ("income", "Доходы"),
@@ -105,8 +105,7 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Запросы к данным", callback_data="main_queries")],
         [InlineKeyboardButton("👥 Сотрудники", callback_data="employee_menu")],
         [InlineKeyboardButton("💸 Добавить расходы", callback_data="add_expense")],
-        [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")],
-        [InlineKeyboardButton("ℹ️ Помощь", callback_data="main_help")]
+        [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -116,7 +115,7 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
         [KeyboardButton(BUTTON_FILES), KeyboardButton(BUTTON_QUERIES)],
         [KeyboardButton(BUTTON_REPORTS)],
         [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_EXPENSE)],
-        [KeyboardButton(BUTTON_HELP)]
+        [KeyboardButton(BUTTON_OFF_SHIFT_EXPENSES)]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -125,8 +124,6 @@ def get_files_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📄 Список файлов", callback_data="files_list")],
         [InlineKeyboardButton("📅 Даты отчётов по клубу", callback_data="files_dates_by_club")],
-        [InlineKeyboardButton("🔍 Последние записи", callback_data="files_latest")],
-        [InlineKeyboardButton("🔄 Переобработать все файлы", callback_data="files_reprocess")],
         [InlineKeyboardButton("🧼 Очистить все файлы", callback_data="files_clear")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
     ]
@@ -479,27 +476,22 @@ async def generate_full_period_report(club_name: str, start_date: date, end_date
     if payments_result:
         all_blocks['Типы оплат'] = payments_result[0]  # payments_result = (data, total_amt)
     
-    # 4. Статистика персонала
-    staff_result = await generate_staff_statistics_period_report(club_name, start_date, end_date)
-    if staff_result:
-        all_blocks['Статистика персонала'] = staff_result[0]
-    
-    # 5. Расходы
+    # 4. Расходы
     expenses_result = await generate_expenses_period_report(club_name, start_date, end_date)
     if expenses_result:
         all_blocks['Расходы'] = expenses_result[0]
     
-    # 6. Инкассация
+    # 5. Инкассация
     cash_result = await generate_cash_collection_period_report(club_name, start_date, end_date)
     if cash_result:
         all_blocks['Инкассация'] = cash_result[0]
     
-    # 7. Долги по персоналу
+    # 6. Долги по персоналу
     debts_result = await generate_staff_debts_period_report(club_name, start_date, end_date)
     if debts_result:
         all_blocks['Долги по персоналу'] = debts_result[0]
     
-    # 8. Итоговый баланс
+    # 7. Итоговый баланс
     totals_result = await generate_totals_summary_period_report(club_name, start_date, end_date)
     if totals_result:
         all_blocks['Итоговый баланс'] = totals_result[0]  # Берем только display_rows
@@ -1594,7 +1586,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await request_password(update.message, context)
         return
 
-    await update.message.reply_text(build_help_text(), parse_mode='Markdown')
+    await update.message.reply_text(
+        "ℹ️ Используйте кнопки меню для навигации.\n\n"
+        "📁 Файлы - управление загруженными файлами\n"
+        "📊 Запросы - просмотр данных из базы\n"
+        "📈 Сформировать отчет - создание сводных отчетов\n"
+        "👥 Сотрудники - управление персоналом\n"
+        "💸 Добавить расходы - добавление расходов вне смены\n"
+        "📋 Расходы вне смены - просмотр расходов вне смены"
+    )
 
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1828,12 +1828,18 @@ async def employees_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка загруженного документа (Excel файл)"""
+    """Обработка загруженного документа (Excel файл или PDF чек)"""
     if not user_is_authorized(update.effective_user.id, context):
         await request_password(update.message, context)
         return
 
-    # Проверка выбора клуба
+    # Проверяем, ожидаем ли мы PDF чек для расходов
+    expense_action = context.user_data.get('expense_action')
+    if expense_action == 'awaiting_pdf':
+        await handle_pdf_receipt(update, context)
+        return
+
+    # Проверка выбора клуба для Excel файлов
     current_club = context.user_data.get('current_club')
     
     if not current_club:
@@ -2120,9 +2126,19 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=get_expense_club_selection_keyboard()
         )
         return
-
-    if user_message.strip() == BUTTON_HELP:
-        await update.message.reply_text(build_help_text(), parse_mode='Markdown')
+    
+    if user_message.strip() == BUTTON_OFF_SHIFT_EXPENSES:
+        # Просмотр расходов вне смены
+        context.user_data['view_expense_action'] = 'select_club'
+        await update.message.reply_text(
+            "📋 Просмотр расходов вне смены\n\n"
+            "Выберите клуб:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏢 Москвич", callback_data="view_expense_club|Москвич")],
+                [InlineKeyboardButton("🏢 Анора", callback_data="view_expense_club|Анора")],
+                [InlineKeyboardButton("⬅️ Отмена", callback_data="main_menu")]
+            ])
+        )
         return
     
     # Обработка ввода периода для отчета
@@ -2529,8 +2545,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_excel_record_count(update.message)
     elif action == 'list_files':
         await send_recent_files(update.message)
-    elif action == 'latest_records':
-        await send_latest_records(update.message)
     elif action == 'request_search_input':
         context.user_data['query_action'] = 'search_column'
         await update.message.reply_text(
@@ -2737,9 +2751,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=get_files_keyboard()
         )
 
-    elif data == "files_latest":
-        await send_latest_records(query.message)
-
     elif data == "files_clear":
         confirmation_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Удалить все", callback_data="files_clear_confirm")],
@@ -2759,114 +2770,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             f"✅ Удалены все расходы вне смены",
             reply_markup=get_files_keyboard()
         )
-    
-    elif data == "files_reprocess":
-        # Переобработка ВСЕХ файлов пользователя
-        try:
-            # Получаем ВСЕ файлы пользователя
-            with db.get_connection() as conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute(
-                        """
-                        SELECT id, file_name, file_content, report_date
-                        FROM uploaded_files
-                        WHERE user_id = %s AND file_content IS NOT NULL
-                        ORDER BY upload_date DESC
-                        """,
-                        (user_id,)
-                    )
-                    all_files = cur.fetchall()
-            
-            if not all_files:
-                await query.message.reply_text("❌ Файлы не найдены")
-                return
-            
-            await query.message.reply_text(f"🔄 Начинаю переобработку {len(all_files)} файлов...")
-            
-            processed_count = 0
-            for file_info in all_files:
-                file_id = file_info['id']
-                file_name = file_info['file_name']
-                file_content = file_info['file_content']
-                
-                # Переобрабатываем все блоки этого файла
-                try:
-                    income_records = excel_processor.extract_income_records(file_content)
-                    if income_records:
-                        db.save_income_records(file_id, income_records)
-                    
-                    ticket_sales_data = excel_processor.extract_ticket_sales(file_content)
-                    if ticket_sales_data.get('records'):
-                        db.save_ticket_sales(file_id, ticket_sales_data['records'])
-                    
-                    payment_types_data = excel_processor.extract_payment_types(file_content)
-                    if payment_types_data.get('records'):
-                        db.save_payment_types(file_id, payment_types_data['records'])
-                    
-                    staff_stats = excel_processor.extract_staff_statistics(file_content)
-                    if staff_stats:
-                        db.save_staff_statistics(file_id, staff_stats)
-                    
-                    expense_data = excel_processor.extract_expense_records(file_content)
-                    if expense_data.get('records'):
-                        db.save_expense_records(file_id, expense_data['records'])
-                    
-                    cash_collection_data = excel_processor.extract_cash_collection(file_content)
-                    if cash_collection_data.get('records'):
-                        db.save_cash_collection(file_id, cash_collection_data['records'])
-                    
-                    staff_debts_data = excel_processor.extract_staff_debts(file_content)
-                    if staff_debts_data.get('records'):
-                        db.save_staff_debts(file_id, staff_debts_data['records'])
-                    
-                    notes_data = excel_processor.extract_notes_entries(file_content)
-                    if notes_data:
-                        notes_records = []
-                        for entry in notes_data.get('безнал', []):
-                            notes_records.append({
-                                'category': entry.get('category', 'безнал'),
-                                'entry_text': entry.get('entry_text', ''),
-                                'is_total': entry.get('is_total', False),
-                                'amount': entry.get('amount')
-                            })
-                        for entry in notes_data.get('нал', []):
-                            notes_records.append({
-                                'category': entry.get('category', 'нал'),
-                                'entry_text': entry.get('entry_text', ''),
-                                'is_total': entry.get('is_total', False),
-                                'amount': entry.get('amount')
-                            })
-                        for text in notes_data.get('extra', []):
-                            notes_records.append({
-                                'category': 'прочее',
-                                'entry_text': text,
-                                'is_total': False,
-                                'amount': None
-                            })
-                        if notes_records:
-                            db.save_notes_entries(file_id, notes_records)
-                    
-                    totals_summary = excel_processor.extract_totals_summary(file_content)
-                    if totals_summary:
-                        db.save_totals_summary(file_id, totals_summary)
-                    
-                    processed_count += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error reprocessing file {file_name}: {e}")
-                    await query.message.reply_text(f"❌ Ошибка при обработке {file_name}: {str(e)}")
-            
-            # Финальное сообщение
-            await query.message.reply_text(
-                f"✅ Переобработка завершена!\n\n"
-                f"Обработано файлов: {processed_count} из {len(all_files)}\n\n"
-                f"Все блоки обновлены с новым парсером.",
-                reply_markup=get_files_keyboard()
-            )
-            
-        except Exception as e:
-            logger.error(f"Error reprocessing files: {e}")
-            await query.message.reply_text(f"❌ Ошибка: {str(e)}")
 
     elif data == "main_queries":
         await send_queries_menu_message(query.message, context)
@@ -2971,9 +2874,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
         await send_report_block_data(query.message, report_date, block_id, context)
 
-    elif data == "main_help":
-        await query.message.reply_text(build_help_text(), parse_mode='Markdown')
-
     elif data == "employee_menu":
         await send_employees_menu_message(query.message)
 
@@ -3030,6 +2930,23 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "• 15.11.2024 (полная дата)"
         )
 
+    elif data == "expense_payment_pdf":
+        context.user_data['expense_payment_type'] = 'Б/Н'
+        context.user_data['expense_action'] = 'awaiting_pdf'
+        
+        club_name = context.user_data.get('expense_club')
+        expense_date = context.user_data.get('expense_date')
+        
+        await query.answer("✅ Загрузка PDF чека")
+        await query.message.reply_text(
+            f"✅ Установлено:\n"
+            f"🏢 Клуб: {club_name}\n"
+            f"📅 Дата: {format_report_date(expense_date)}\n"
+            f"💳 Тип оплаты: Б/Н\n\n"
+            "📄 Отправьте PDF чек (файл).\n"
+            "Бот автоматически извлечет получателя и сумму платежа."
+        )
+    
     elif data.startswith("expense_payment|"):
         payment_type = data.split("|", 1)[1]
         context.user_data['expense_payment_type'] = payment_type
@@ -3048,6 +2965,57 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "Введите расходы (можно несколько через пробел или с новой строки):\n"
             "Например: пиво 800 или пиво 800 насвай 300\n\n"
             "Когда закончите, напишите 'сохранить'"
+        )
+
+    elif data == "confirm_pdf_expense":
+        # Подтверждение PDF расхода
+        recipient = context.user_data.get('pdf_recipient')
+        amount = context.user_data.get('pdf_amount')
+        club_name = context.user_data.get('expense_club')
+        expense_date = context.user_data.get('expense_date')
+        payment_type = context.user_data.get('expense_payment_type', 'Б/Н')
+        
+        user_id = query.from_user.id
+        username = query.from_user.username or query.from_user.full_name
+        
+        # Сохраняем в БД
+        db.add_off_shift_expense(
+            user_id=user_id,
+            username=username,
+            club_name=club_name,
+            expense_item=recipient,
+            amount=Decimal(str(amount)),
+            payment_type=payment_type,
+            expense_date=expense_date
+        )
+        
+        # Очищаем данные сессии
+        context.user_data.pop('expense_action', None)
+        context.user_data.pop('pdf_recipient', None)
+        context.user_data.pop('pdf_amount', None)
+        
+        await query.answer("✅ Сохранено!")
+        await query.message.reply_text(
+            f"✅ Расход сохранен!\n\n"
+            f"📄 Получатель: {recipient}\n"
+            f"💰 Сумма: {amount}\n"
+            f"💳 Тип: {payment_type}\n"
+            f"🏢 Клуб: {club_name}\n"
+            f"📅 Дата: {format_report_date(expense_date)}"
+        )
+    
+    elif data == "edit_pdf_recipient":
+        context.user_data['expense_action'] = 'edit_recipient'
+        await query.answer("✏️ Введите получателя")
+        await query.message.reply_text(
+            "✏️ Введите нового получателя (название организации):"
+        )
+    
+    elif data == "edit_pdf_amount":
+        context.user_data['expense_action'] = 'edit_amount'
+        await query.answer("✏️ Введите сумму")
+        await query.message.reply_text(
+            "✏️ Введите новую сумму (только число):"
         )
 
     elif data == "view_off_shift_expenses":
@@ -3136,8 +3104,9 @@ async def handle_expense_text_action(update: Update, context: ContextTypes.DEFAU
         
         # Показываем выбор типа оплаты
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💵 Наличные", callback_data="expense_payment|Наличные")],
-            [InlineKeyboardButton("💳 Б/Н", callback_data="expense_payment|Б/Н")],
+            [InlineKeyboardButton("💵 Наличные (ввод вручную)", callback_data="expense_payment|Наличные")],
+            [InlineKeyboardButton("💳 Б/Н (ввод вручную)", callback_data="expense_payment|Б/Н")],
+            [InlineKeyboardButton("📄 Б/Н (загрузить PDF чек)", callback_data="expense_payment_pdf")],
             [InlineKeyboardButton("⬅️ Отмена", callback_data="main_menu")]
         ])
         
@@ -3147,6 +3116,73 @@ async def handle_expense_text_action(update: Update, context: ContextTypes.DEFAU
             "Выберите тип оплаты:",
             reply_markup=keyboard
         )
+    
+    elif action == 'edit_recipient':
+        # Редактирование получателя из PDF
+        recipient = user_message.strip()
+        context.user_data['pdf_recipient'] = recipient
+        context.user_data['expense_action'] = 'confirm_pdf'
+        
+        amount = context.user_data.get('pdf_amount')
+        club_name = context.user_data.get('expense_club')
+        expense_date = context.user_data.get('expense_date')
+        
+        # Показываем обновленное превью
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_pdf_expense")],
+            [InlineKeyboardButton("✏️ Изменить получателя", callback_data="edit_pdf_recipient")],
+            [InlineKeyboardButton("✏️ Изменить сумму", callback_data="edit_pdf_amount")],
+            [InlineKeyboardButton("❌ Отменить", callback_data="main_menu")]
+        ])
+        
+        await update.message.reply_text(
+            f"✅ Получатель обновлен!\n\n"
+            f"📄 Получатель: {recipient}\n"
+            f"💰 Сумма: {amount}\n"
+            f"💳 Тип оплаты: Б/Н\n"
+            f"🏢 Клуб: {club_name}\n"
+            f"📅 Дата: {format_report_date(expense_date)}\n\n"
+            "Подтвердить или изменить?",
+            reply_markup=keyboard
+        )
+    
+    elif action == 'edit_amount':
+        # Редактирование суммы из PDF
+        try:
+            amount = Decimal(user_message.strip().replace(',', '.').replace(' ', ''))
+            if amount <= 0:
+                raise ValueError("Сумма должна быть больше 0")
+            
+            context.user_data['pdf_amount'] = amount
+            context.user_data['expense_action'] = 'confirm_pdf'
+            
+            recipient = context.user_data.get('pdf_recipient')
+            club_name = context.user_data.get('expense_club')
+            expense_date = context.user_data.get('expense_date')
+            
+            # Показываем обновленное превью
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_pdf_expense")],
+                [InlineKeyboardButton("✏️ Изменить получателя", callback_data="edit_pdf_recipient")],
+                [InlineKeyboardButton("✏️ Изменить сумму", callback_data="edit_pdf_amount")],
+                [InlineKeyboardButton("❌ Отменить", callback_data="main_menu")]
+            ])
+            
+            await update.message.reply_text(
+                f"✅ Сумма обновлена!\n\n"
+                f"📄 Получатель: {recipient}\n"
+                f"💰 Сумма: {amount}\n"
+                f"💳 Тип оплаты: Б/Н\n"
+                f"🏢 Клуб: {club_name}\n"
+                f"📅 Дата: {format_report_date(expense_date)}\n\n"
+                "Подтвердить или изменить?",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Неверный формат суммы!\n"
+                "Введите число, например: 1500 или 1500.50"
+            )
     
     elif action == 'awaiting_expenses':
         # Ожидаем ввод расходов или команду "сохранить"
@@ -3511,6 +3547,92 @@ def build_help_text() -> str:
 
 ❓ **Подсказка:** Используйте кнопки меню или команду /help при необходимости.
 """
+
+
+async def handle_pdf_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка загруженного PDF чека для расходов"""
+    from pdf_parser import pdf_parser
+    import os
+    import tempfile
+    
+    document = update.message.document
+    
+    # Проверка что это PDF
+    if not document.file_name.lower().endswith('.pdf'):
+        await update.message.reply_text(
+            "❌ Пожалуйста, отправьте PDF файл!\n"
+            "Формат файла должен быть: .pdf"
+        )
+        return
+    
+    # Проверка размера
+    if document.file_size > 10 * 1024 * 1024:  # 10 MB
+        await update.message.reply_text("❌ Файл слишком большой! Максимальный размер: 10 МБ")
+        return
+    
+    processing_msg = await update.message.reply_text("⏳ Обрабатываю PDF чек...")
+    
+    try:
+        # Скачивание файла
+        file = await context.bot.get_file(document.file_id)
+        
+        # Сохраняем во временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            tmp_path = tmp_file.name
+            await file.download_to_drive(tmp_path)
+        
+        # Парсим PDF
+        result = pdf_parser.parse_receipt(tmp_path)
+        
+        # Удаляем временный файл
+        os.unlink(tmp_path)
+        
+        if result['success']:
+            recipient = result['recipient']
+            amount = result['amount']
+            
+            # Сохраняем в context для подтверждения
+            context.user_data['pdf_recipient'] = recipient
+            context.user_data['pdf_amount'] = amount
+            context.user_data['expense_action'] = 'confirm_pdf'
+            
+            # Показываем превью с кнопками подтверждения
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_pdf_expense")],
+                [InlineKeyboardButton("✏️ Изменить получателя", callback_data="edit_pdf_recipient")],
+                [InlineKeyboardButton("✏️ Изменить сумму", callback_data="edit_pdf_amount")],
+                [InlineKeyboardButton("❌ Отменить", callback_data="main_menu")]
+            ])
+            
+            club_name = context.user_data.get('expense_club')
+            expense_date = context.user_data.get('expense_date')
+            
+            await processing_msg.edit_text(
+                f"✅ PDF чек обработан!\n\n"
+                f"📄 Получатель: {recipient}\n"
+                f"💰 Сумма: {amount}\n"
+                f"💳 Тип оплаты: Б/Н\n"
+                f"🏢 Клуб: {club_name}\n"
+                f"📅 Дата: {format_report_date(expense_date)}\n\n"
+                "Подтвердить или изменить?",
+                reply_markup=keyboard
+            )
+        else:
+            error_msg = result.get('error', 'Неизвестная ошибка')
+            await processing_msg.edit_text(
+                f"❌ Не удалось обработать PDF:\n{error_msg}\n\n"
+                "Попробуйте загрузить другой файл или введите данные вручную."
+            )
+            # Возвращаем в состояние выбора типа оплаты
+            context.user_data['expense_action'] = 'awaiting_payment_type'
+    
+    except Exception as e:
+        logger.error(f"Error handling PDF receipt: {e}", exc_info=True)
+        await processing_msg.edit_text(
+            f"❌ Ошибка обработки PDF: {str(e)}\n\n"
+            "Попробуйте загрузить другой файл или введите данные вручную."
+        )
+        context.user_data['expense_action'] = 'awaiting_payment_type'
 
 
 def main():
