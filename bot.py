@@ -83,6 +83,7 @@ BUTTON_FILES = "📁 Файлы"
 BUTTON_QUERIES = "📊 Запросы"
 BUTTON_REPORTS = "📈 Сформировать отчет"
 BUTTON_EMPLOYEES = "👥 Сотрудники"
+BUTTON_EXPENSE = "💸 Добавить расходы"
 BUTTON_HELP = "ℹ️ Помощь"
 DATE_FORMATS = ["%Y-%m-%d", "%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y"]
 QUERY_BLOCKS = [
@@ -103,6 +104,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📁 Файлы", callback_data="main_files")],
         [InlineKeyboardButton("📊 Запросы к данным", callback_data="main_queries")],
         [InlineKeyboardButton("👥 Сотрудники", callback_data="employee_menu")],
+        [InlineKeyboardButton("💸 Добавить расходы", callback_data="add_expense")],
+        [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")],
         [InlineKeyboardButton("ℹ️ Помощь", callback_data="main_help")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -112,7 +115,8 @@ def get_main_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [KeyboardButton(BUTTON_FILES), KeyboardButton(BUTTON_QUERIES)],
         [KeyboardButton(BUTTON_REPORTS)],
-        [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_HELP)]
+        [KeyboardButton(BUTTON_EMPLOYEES), KeyboardButton(BUTTON_EXPENSE)],
+        [KeyboardButton(BUTTON_HELP)]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -148,6 +152,16 @@ def get_club_selection_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏢 Москвич", callback_data="select_club|Москвич")],
         [InlineKeyboardButton("🌟 Анора", callback_data="select_club|Анора")],
         [InlineKeyboardButton("📊 Оба клуба", callback_data="select_club|Оба")],
+        [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_expense_club_selection_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура выбора клуба для расходов (без кнопки 'Оба')"""
+    keyboard = [
+        [InlineKeyboardButton("🏢 Москвич", callback_data="expense_club|Москвич")],
+        [InlineKeyboardButton("🌟 Анора", callback_data="expense_club|Анора")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -276,6 +290,125 @@ def parse_report_date_from_text(text: str) -> Optional[date]:
 
 def format_report_date(d: date) -> str:
     return d.strftime("%d.%m.%Y")
+
+
+def parse_expenses_from_text(text: str) -> List[tuple[str, Decimal]]:
+    """Парсинг расходов из текста
+    Поддерживает:
+    - Несколько расходов через пробел или новую строку
+    - Форматы: 'название сумма' и 'сумма название'
+    - Разделители: пробел, дефис с/без пробелов
+    Примеры:
+    - 'пиво 800 насвай 300'
+    - 'пиво 300\nнасвай 700'
+    - '800 пиво'
+    - 'пиво-800'
+    - 'пиво - 800'
+    """
+    if not text or not text.strip():
+        return []
+    
+    expenses = []
+    text = text.strip()
+    
+    # Разбиваем на строки (для поддержки многострочного ввода)
+    lines = text.split('\n')
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Паттерн для поиска чисел (целые или с точкой/запятой)
+        number_pattern = r'\d+(?:[.,]\d+)?'
+        
+        # Ищем все числа в строке
+        numbers = re.findall(number_pattern, line)
+        
+        if not numbers:
+            continue
+        
+        # Разбиваем строку на части по числам
+        parts = re.split(number_pattern, line)
+        numbers_positions = []
+        
+        # Находим позиции всех чисел
+        for match in re.finditer(number_pattern, line):
+            numbers_positions.append((match.start(), match.end(), match.group()))
+        
+        # Обрабатываем каждое число
+        for i, (start, end, num_str) in enumerate(numbers_positions):
+            amount_str = num_str.replace(',', '.')
+            try:
+                amount = Decimal(amount_str)
+            except:
+                continue
+            
+            # Определяем название - текст до или после числа
+            before = line[:start].strip()
+            after = line[end:].strip()
+            
+            # Убираем разделители (дефисы, пробелы вокруг дефисов)
+            before = re.sub(r'\s*-\s*$', '', before).strip()
+            after = re.sub(r'^\s*-\s*', '', after).strip()
+            
+            # Определяем название (берем непустую часть)
+            expense_item = None
+            
+            # Если есть текст до числа - это название (формат "название сумма")
+            if before:
+                expense_item = before
+                # Если после числа тоже есть текст, это может быть следующее название
+                # Но мы уже взяли текущее название, так что пропускаем
+            # Если нет текста до числа, но есть после - это формат "сумма название"
+            elif after:
+                expense_item = after
+                # Проверяем, не является ли это началом следующего расхода
+                # Если после числа идет пробел и еще одно число - это следующий расход
+                next_match = re.search(number_pattern, after)
+                if next_match:
+                    # Берем только текст до следующего числа
+                    expense_item = after[:next_match.start()].strip()
+                    expense_item = re.sub(r'\s*-\s*$', '', expense_item).strip()
+            
+            if expense_item:
+                expenses.append((expense_item, amount))
+    
+    # Если не нашли расходы в многострочном формате, пробуем парсить как одну строку
+    if not expenses:
+        # Пробуем найти пары "название число" или "число название"
+        # Разбиваем по пробелам и ищем паттерны
+        words_and_numbers = re.findall(r'\S+', text)
+        
+        i = 0
+        while i < len(words_and_numbers):
+            word = words_and_numbers[i]
+            
+            # Проверяем, является ли это числом
+            if re.match(r'^\d+(?:[.,]\d+)?$', word):
+                amount_str = word.replace(',', '.')
+                try:
+                    amount = Decimal(amount_str)
+                    # Ищем название - либо до, либо после числа
+                    if i > 0:
+                        # Формат "название сумма"
+                        expense_item = ' '.join(words_and_numbers[:i])
+                        if expense_item:
+                            expenses.append((expense_item, amount))
+                            words_and_numbers = words_and_numbers[i+1:]
+                            i = 0
+                            continue
+                    if i < len(words_and_numbers) - 1:
+                        # Формат "сумма название"
+                        expense_item = ' '.join(words_and_numbers[i+1:])
+                        if expense_item:
+                            expenses.append((expense_item, amount))
+                            break
+                except:
+                    pass
+            i += 1
+    
+    return expenses
 
 
 def decimal_to_str(value) -> str:
@@ -414,17 +547,37 @@ async def generate_totals_summary_period_report(club_name: str, start_date: date
         
         all_payments_by_file.append(file_payments)
     
-    # ШАГ 2: Выбираем порядок из файла с максимумом типов оплат
+    # ШАГ 2: Добавляем ПРОЧИЕ РАСХОДЫ (расходы вне смены) за этот период
+    off_shift_expenses = db.get_off_shift_expenses(club_name, start_date, end_date)
+    
+    if off_shift_expenses:
+        off_shift_payments = []
+        for exp in off_shift_expenses:
+            payment_type = exp.get('payment_type', 'Наличные')
+            amount = Decimal(str(exp.get('amount', 0)))
+            
+            # Добавляем к расходам для соответствующего типа оплаты
+            totals_summary[payment_type]['expense'] += amount
+            # Пересчитываем прибыль
+            totals_summary[payment_type]['profit'] = totals_summary[payment_type]['income'] - totals_summary[payment_type]['expense']
+            
+            # Запоминаем порядок
+            if payment_type not in off_shift_payments:
+                off_shift_payments.append(payment_type)
+        
+        all_payments_by_file.append(off_shift_payments)
+    
+    # ШАГ 3: Выбираем порядок из файла с максимумом типов оплат
     if all_payments_by_file:
         payment_order = max(all_payments_by_file, key=len)
     
-    # ШАГ 3: Добавляем типы, которые есть в других файлах, но нет в payment_order
+    # ШАГ 4: Добавляем типы, которые есть в других файлах, но нет в payment_order
     for file_payments in all_payments_by_file:
         for payment in file_payments:
             if payment not in payment_order:
                 payment_order.append(payment)
     
-    # ШАГ 4: Формируем список для вывода
+    # ШАГ 5: Формируем список для вывода
     display_rows = []
     
     for payment_type in payment_order:
@@ -600,14 +753,11 @@ async def generate_cash_collection_period_report(club_name: str, start_date: dat
 
 
 async def generate_expenses_period_report(club_name: str, start_date: date, end_date: date):
-    """Генерация сводного отчета по расходам за период"""
+    """Генерация сводного отчета по расходам за период (включая прочие расходы вне смены)"""
     from collections import defaultdict
     
     # Получаем все файлы за период
     files = db.get_files_by_period(start_date, end_date, club_name)
-    
-    if not files:
-        return None
     
     # Словарь для суммирования: {expense_item: sum}
     expense_summary = defaultdict(Decimal)
@@ -617,40 +767,63 @@ async def generate_expenses_period_report(club_name: str, start_date: date, end_
     # ШАГ 1: Собираем ВСЕ уникальные статьи расходов из ВСЕХ файлов периода
     all_expenses_by_file = []
     
-    for file_info in files:
-        file_id = file_info['id']
-        records = db.list_expense_records(file_id)
-        
-        file_expenses = []
-        for rec in records:
-            expense_item = rec.get('expense_item')
-            amount = rec.get('amount') or Decimal('0')
-            is_total = rec.get('is_total', False)
+    if files:
+        for file_info in files:
+            file_id = file_info['id']
+            records = db.list_expense_records(file_id)
             
-            if is_total:
-                # Это итоговая строка - пропускаем, посчитаем сами
-                continue
+            file_expenses = []
+            for rec in records:
+                expense_item = rec.get('expense_item')
+                amount = rec.get('amount') or Decimal('0')
+                is_total = rec.get('is_total', False)
+                
+                if is_total:
+                    # Это итоговая строка - пропускаем, посчитаем сами
+                    continue
+                
+                # Суммируем
+                expense_summary[expense_item] += amount
+                
+                # Запоминаем порядок для этого файла
+                if expense_item not in file_expenses:
+                    file_expenses.append(expense_item)
             
-            # Суммируем
+            all_expenses_by_file.append(file_expenses)
+    
+    # ШАГ 2: Добавляем ПРОЧИЕ РАСХОДЫ (расходы вне смены) за этот период
+    off_shift_expenses = db.get_off_shift_expenses(club_name, start_date, end_date)
+    
+    if off_shift_expenses:
+        off_shift_items = []
+        for exp in off_shift_expenses:
+            expense_item = exp.get('expense_item')
+            amount = Decimal(str(exp.get('amount', 0)))
+            
+            # Суммируем (добавляем к существующим или создаем новую статью)
             expense_summary[expense_item] += amount
             
-            # Запоминаем порядок для этого файла
-            if expense_item not in file_expenses:
-                file_expenses.append(expense_item)
+            # Запоминаем порядок
+            if expense_item not in off_shift_items:
+                off_shift_items.append(expense_item)
         
-        all_expenses_by_file.append(file_expenses)
+        all_expenses_by_file.append(off_shift_items)
     
-    # ШАГ 2: Выбираем порядок из файла с максимумом статей расходов
+    # Если нет ни расходов из файлов, ни прочих расходов - возвращаем None
+    if not expense_summary:
+        return None
+    
+    # ШАГ 3: Выбираем порядок из файла с максимумом статей расходов
     if all_expenses_by_file:
         expense_order = max(all_expenses_by_file, key=len)
     
-    # ШАГ 3: Добавляем статьи, которые есть в других файлах, но нет в expense_order
+    # ШАГ 4: Добавляем статьи, которые есть в других файлах, но нет в expense_order
     for file_expenses in all_expenses_by_file:
         for expense in file_expenses:
             if expense not in expense_order:
                 expense_order.append(expense)
     
-    # ШАГ 4: Формируем список для вывода
+    # ШАГ 5: Формируем список для вывода
     display_rows = []
     total_amount = Decimal('0')
     
@@ -1271,18 +1444,48 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         if not records:
             await target_message.reply_text("📭 Нет итогового баланса для этой даты.")
             return
+        
+        # Создаем словарь для агрегации с учетом прочих расходов
+        totals_dict = {}
+        for rec in records:
+            payment_type = rec['payment_type']
+            totals_dict[payment_type] = {
+                'income': Decimal(str(rec['income_amount'] or 0)),
+                'expense': Decimal(str(rec['expense_amount'] or 0)),
+                'profit': Decimal(str(rec['net_profit'] or 0))
+            }
+        
+        # Добавляем прочие расходы за эту дату
+        off_shift_expenses = db.get_off_shift_expenses(club_name, report_date, report_date)
+        if off_shift_expenses:
+            for exp in off_shift_expenses:
+                payment_type = exp.get('payment_type', 'Наличные')
+                amount = Decimal(str(exp.get('amount', 0)))
+                
+                if payment_type not in totals_dict:
+                    totals_dict[payment_type] = {
+                        'income': Decimal('0'),
+                        'expense': Decimal('0'),
+                        'profit': Decimal('0')
+                    }
+                
+                # Добавляем к расходам
+                totals_dict[payment_type]['expense'] += amount
+                # Пересчитываем прибыль
+                totals_dict[payment_type]['profit'] = totals_dict[payment_type]['income'] - totals_dict[payment_type]['expense']
+        
         lines = [f"📊 Итоговый баланс ({format_report_date(report_date)}) - {club_label}:"]
         display_rows = []
-        for rec in records:
+        for payment_type, values in totals_dict.items():
             lines.append(
-                f"• {rec['payment_type']}: доход {decimal_to_str(rec['income_amount'])}, "
-                f"расход {decimal_to_str(rec['expense_amount'])}, чистая прибыль {decimal_to_str(rec['net_profit'])}"
+                f"• {payment_type}: доход {decimal_to_str(values['income'])}, "
+                f"расход {decimal_to_str(values['expense'])}, чистая прибыль {decimal_to_str(values['profit'])}"
             )
             display_rows.append({
-                'Тип оплаты': rec['payment_type'],
-                'Доход': decimal_to_float(rec['income_amount']),
-                'Расход': decimal_to_float(rec['expense_amount']),
-                'Чистая прибыль': decimal_to_float(rec['net_profit'])
+                'Тип оплаты': payment_type,
+                'Доход': decimal_to_float(values['income']),
+                'Расход': decimal_to_float(values['expense']),
+                'Чистая прибыль': decimal_to_float(values['profit'])
             })
         await target_message.reply_text("\n".join(lines))
         excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Итоговый баланс - {club_label}", club_label)
@@ -1887,6 +2090,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_employees_menu_message(update.message)
         return
 
+    if user_message.strip() == BUTTON_EXPENSE:
+        await update.message.reply_text(
+            "💸 Добавление расходов вне смены\n\n"
+            "Выберите клуб:",
+            reply_markup=get_expense_club_selection_keyboard()
+        )
+        return
+
     if user_message.strip() == BUTTON_HELP:
         await update.message.reply_text(build_help_text(), parse_mode='Markdown')
         return
@@ -1895,17 +2106,26 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     if context.user_data.get('awaiting_report_period'):
         club_name = context.user_data.get('report_club')
         block_id = context.user_data.get('report_block', 'income')
+        
+        # Пробуем распарсить как период
         period = parse_period_from_text(user_message)
         
-        if period is None:
-            await update.message.reply_text(
-                "❌ Неверный формат периода!\n\n"
-                "Используйте формат: 1.11-5.12 или 1,11-5,12\n"
-                "Попробуйте еще раз:"
-            )
-            return
-        
-        start_date, end_date = period
+        if period:
+            start_date, end_date = period
+        else:
+            # Пробуем распарсить как одну дату
+            single_date = parse_report_date_from_text(user_message)
+            if single_date:
+                start_date = end_date = single_date
+            else:
+                await update.message.reply_text(
+                    "❌ Неверный формат!\n\n"
+                    "Используйте формат:\n"
+                    "• Одна дата: 1.11 или 1,11\n"
+                    "• Период: 1.11-5.12 или 1,11-5,12\n"
+                    "Попробуйте еще раз:"
+                )
+                return
         context.user_data.pop('awaiting_report_period', None)
         context.user_data.pop('report_block', None)
         
@@ -2226,6 +2446,14 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await handle_employee_text_action(update, context, user_message)
         return
 
+    if context.user_data.get('expense_action'):
+        await handle_expense_text_action(update, context, user_message)
+        return
+
+    if context.user_data.get('view_expense_action') == 'awaiting_date':
+        await handle_view_expense_date(update, context, user_message)
+        return
+
     if context.user_data.get('query_action') == 'search_column':
         await handle_search_query_input(update, context, user_message)
         return
@@ -2462,7 +2690,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "files_clear_confirm":
         deleted = db.clear_uploaded_files()
         await query.message.reply_text(
-            f"🧼 Очистка завершена. Удалено файлов: {deleted}",
+            f"🧼 Очистка завершена.\n"
+            f"✅ Удалены все файлы и связанные данные\n"
+            f"✅ Удалены все расходы вне смены",
             reply_markup=get_files_keyboard()
         )
     
@@ -2629,17 +2859,34 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text(
             f"🏢 Клуб: {club_name}\n"
             f"📊 Блок: {block_name}\n\n"
-            "📅 Введите период для отчета:\n\n"
-            "Формат: 1.11-5.12 или 1,11-5,12\n"
+            "Введите дату или период для формирования отчета.\n"
+            "Форматы:\n"
+            "• Одна дата: 1.11 или 1,11\n"
+            "• Период: 1.11-5.12 или 1,11-5,12\n"
             "(бот автоматически подставит текущий год)\n\n"
-            "Пример: 1.11-30.11"
+            "Примеры: 1.11 или 1.11-30.11"
         )
 
     elif data.startswith("select_club|"):
         selected_club = data.split("|", 1)[1]
         context.user_data['current_club'] = selected_club
-        await query.answer(f"✅ Выбран: {selected_club}")
-        await send_report_dates_menu(query.message, context)
+        
+        # Если был запрос на добавление расхода
+        if context.user_data.get('expense_pending_club'):
+            context.user_data.pop('expense_pending_club', None)
+            context.user_data['expense_action'] = 'add'
+            await query.answer(f"✅ Выбран: {selected_club}")
+            await query.message.reply_text(
+                f"💸 Добавление расхода для клуба: {selected_club}\n\n"
+                "Введите название статьи расхода и сумму в одном сообщении.\n"
+                "Примеры:\n"
+                "• денис 1000\n"
+                "• пиво800\n"
+                "• продукты 5000"
+            )
+        else:
+            await query.answer(f"✅ Выбран: {selected_club}")
+            await send_report_dates_menu(query.message, context)
 
     elif data.startswith("query_date|"):
         date_str = data.split("|", 1)[1]
@@ -2698,6 +2945,71 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             "`УДАЛИТЬ ВСЕХ`",
             parse_mode='Markdown'
         )
+
+    elif data == "add_expense":
+        await query.message.reply_text(
+            "💸 Добавление расходов вне смены\n\n"
+            "Выберите клуб:",
+            reply_markup=get_expense_club_selection_keyboard()
+        )
+
+    elif data.startswith("expense_club|"):
+        selected_club = data.split("|", 1)[1]
+        context.user_data['expense_club'] = selected_club
+        context.user_data['expense_action'] = 'awaiting_date'
+        await query.answer(f"✅ Выбран клуб: {selected_club}")
+        await query.message.reply_text(
+            f"💸 Добавление расходов для клуба: {selected_club}\n\n"
+            "Введите дату расхода в формате:\n"
+            "• 1,11 или 1.11 (1 ноября текущего года)\n"
+            "• 15.11.2024 (полная дата)"
+        )
+
+    elif data.startswith("expense_payment|"):
+        payment_type = data.split("|", 1)[1]
+        context.user_data['expense_payment_type'] = payment_type
+        context.user_data['expense_action'] = 'awaiting_expenses'
+        context.user_data['expense_list'] = []
+        
+        club_name = context.user_data.get('expense_club')
+        expense_date = context.user_data.get('expense_date')
+        
+        await query.answer(f"✅ Тип оплаты: {payment_type}")
+        await query.message.reply_text(
+            f"✅ Установлено:\n"
+            f"🏢 Клуб: {club_name}\n"
+            f"📅 Дата: {format_report_date(expense_date)}\n"
+            f"💳 Тип оплаты: {payment_type}\n\n"
+            "Введите расходы (можно несколько через пробел или с новой строки):\n"
+            "Например: пиво 800 или пиво 800 насвай 300\n\n"
+            "Когда закончите, напишите 'сохранить'"
+        )
+
+    elif data == "view_off_shift_expenses":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏢 Москвич", callback_data="view_expense_club|Москвич")],
+            [InlineKeyboardButton("🌟 Анора", callback_data="view_expense_club|Анора")],
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        ])
+        await query.message.reply_text(
+            "📋 Просмотр расходов вне смены\n\n"
+            "Выберите клуб:",
+            reply_markup=keyboard
+        )
+        context.user_data['view_expense_action'] = 'select_club'
+
+    elif data.startswith("view_expense_club|"):
+        selected_club = data.split("|", 1)[1]
+        context.user_data['view_expense_club'] = selected_club
+        context.user_data['view_expense_action'] = 'awaiting_date'
+        await query.answer(f"✅ Выбран клуб: {selected_club}")
+        await query.message.reply_text(
+            f"📋 Просмотр расходов вне смены\n"
+            f"🏢 Клуб: {selected_club}\n\n"
+            "Введите дату или период:\n"
+            "• Дата: 1,11 или 1.11 (1 ноября)\n"
+            "• Период: 1.11-5.12 или 1,11-5,12"
+        )
     else:
         await query.message.reply_text("Команда не поддерживается. Используйте меню ниже.")
 
@@ -2736,8 +3048,253 @@ async def handle_employee_text_action(update: Update, context: ContextTypes.DEFA
                 f"🧼 Удалено сотрудников: {deleted}")
         else:
             await update.message.reply_text("❌ Очистка отменена")
- 
- 
+
+
+async def handle_expense_text_action(update: Update, context: ContextTypes.DEFAULT_TYPE, user_message: str):
+    """Обработка текстовых ответов для добавления расходов"""
+    action = context.user_data.get('expense_action')
+    
+    if action == 'awaiting_date':
+        # Ожидаем ввод даты
+        expense_date = parse_report_date_from_text(user_message)
+        if expense_date is None:
+            await update.message.reply_text(
+                "❌ Не удалось распознать дату.\n"
+                "Используйте формат: 1,11 или 1.11 (1 ноября текущего года)"
+            )
+            return
+        
+        context.user_data['expense_date'] = expense_date
+        context.user_data['expense_action'] = 'awaiting_payment_type'
+        
+        club_name = context.user_data.get('expense_club')
+        
+        # Показываем выбор типа оплаты
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💵 Наличные", callback_data="expense_payment|Наличные")],
+            [InlineKeyboardButton("💳 Б/Н", callback_data="expense_payment|Б/Н")],
+            [InlineKeyboardButton("⬅️ Отмена", callback_data="main_menu")]
+        ])
+        
+        await update.message.reply_text(
+            f"✅ Дата установлена: {format_report_date(expense_date)}\n"
+            f"🏢 Клуб: {club_name}\n\n"
+            "Выберите тип оплаты:",
+            reply_markup=keyboard
+        )
+    
+    elif action == 'awaiting_expenses':
+        # Ожидаем ввод расходов или команду "сохранить"
+        user_message_lower = user_message.strip().lower()
+        
+        if user_message_lower == 'сохранить':
+            # Сохраняем все расходы
+            await save_expenses(update, context)
+        else:
+            # Парсим расходы из текста
+            expenses = parse_expenses_from_text(user_message)
+            
+            if not expenses:
+                await update.message.reply_text(
+                    "❌ Не удалось распознать расходы.\n"
+                    "Используйте формат: название сумма\n"
+                    "Примеры: 'пиво 800', '800 пиво', 'пиво-800'"
+                )
+                return
+            
+            # Добавляем в список расходов сессии
+            if 'expense_list' not in context.user_data:
+                context.user_data['expense_list'] = []
+            
+            context.user_data['expense_list'].extend(expenses)
+            
+            # Показываем предпросмотр
+            total = sum(amount for _, amount in expenses)
+            preview_lines = [f"✅ Добавлено расходов: {len(expenses)}"]
+            for item, amount in expenses:
+                preview_lines.append(f"• {item}: {decimal_to_str(amount)}")
+            preview_lines.append(f"💰 Сумма: {decimal_to_str(total)}")
+            preview_lines.append(f"\nВсего в сессии: {len(context.user_data['expense_list'])} расходов")
+            preview_lines.append("Напишите 'сохранить' для сохранения или введите еще расходы")
+            
+            await update.message.reply_text("\n".join(preview_lines))
+
+
+async def save_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сохранение всех расходов из сессии в БД"""
+    expense_list = context.user_data.get('expense_list', [])
+    expense_date = context.user_data.get('expense_date')
+    club_name = context.user_data.get('expense_club')
+    
+    if not expense_list:
+        await update.message.reply_text(
+            "❌ Нет расходов для сохранения.\n"
+            "Введите расходы перед сохранением."
+        )
+        return
+    
+    if not expense_date:
+        await update.message.reply_text(
+            "❌ Дата не установлена. Начните заново."
+        )
+        return
+    
+    if not club_name:
+        await update.message.reply_text(
+            "❌ Клуб не выбран. Начните заново."
+        )
+        return
+    
+    user_id = update.effective_user.id
+    username = update.effective_user.username or update.effective_user.first_name
+    
+    saved_count = 0
+    total_amount = Decimal('0')
+    
+    try:
+        payment_type = context.user_data.get('expense_payment_type', 'Наличные')
+        for expense_item, amount in expense_list:
+            db.add_off_shift_expense(
+                user_id=user_id,
+                username=username,
+                club_name=club_name,
+                expense_item=expense_item,
+                amount=amount,
+                payment_type=payment_type,
+                expense_date=expense_date
+            )
+            saved_count += 1
+            total_amount += amount
+        
+        # Очищаем данные сессии
+        context.user_data.pop('expense_action', None)
+        context.user_data.pop('expense_list', None)
+        context.user_data.pop('expense_date', None)
+        context.user_data.pop('expense_club', None)
+        
+        await update.message.reply_text(
+            f"✅ Сохранено расходов: {saved_count}\n"
+            f"🏢 Клуб: {club_name}\n"
+            f"📅 Дата: {format_report_date(expense_date)}\n"
+            f"💰 Общая сумма: {decimal_to_str(total_amount)}"
+        )
+    except Exception as e:
+        logger.error(f"Error saving expenses: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка при сохранении расходов: {str(e)}"
+        )
+
+
+async def handle_view_expense_date(update: Update, context: ContextTypes.DEFAULT_TYPE, user_message: str):
+    """Обработка ввода даты/периода для просмотра расходов вне смены"""
+    club_name = context.user_data.get('view_expense_club')
+    
+    if not club_name:
+        await update.message.reply_text("❌ Клуб не выбран. Начните заново.")
+        return
+    
+    # Пробуем распарсить как период
+    period = parse_period_from_text(user_message)
+    
+    if period:
+        # Это период
+        start_date, end_date = period
+        await show_off_shift_expenses_report(update, context, club_name, start_date, end_date)
+    else:
+        # Пробуем распарсить как дату
+        expense_date = parse_report_date_from_text(user_message)
+        if expense_date:
+            await show_off_shift_expenses_report(update, context, club_name, expense_date, expense_date)
+        else:
+            await update.message.reply_text(
+                "❌ Не удалось распознать дату или период.\n"
+                "Используйте формат:\n"
+                "• Дата: 1,11 или 1.11\n"
+                "• Период: 1.11-5.12"
+            )
+
+
+async def show_off_shift_expenses_report(update: Update, context: ContextTypes.DEFAULT_TYPE, 
+                                        club_name: str, start_date: date, end_date: date):
+    """Показ отчета по расходам вне смены"""
+    try:
+        expenses = db.get_off_shift_expenses(club_name, start_date, end_date)
+        
+        if not expenses:
+            period_text = format_report_date(start_date)
+            if start_date != end_date:
+                period_text = f"{format_report_date(start_date)} - {format_report_date(end_date)}"
+            await update.message.reply_text(
+                f"📭 Нет расходов вне смены за период {period_text}\n"
+                f"🏢 Клуб: {club_name}"
+            )
+            context.user_data.pop('view_expense_action', None)
+            context.user_data.pop('view_expense_club', None)
+            return
+        
+        # Формируем предпросмотр
+        total_amount = sum(Decimal(str(exp.get('amount', 0))) for exp in expenses)
+        period_text = format_report_date(start_date)
+        if start_date != end_date:
+            period_text = f"{format_report_date(start_date)} - {format_report_date(end_date)}"
+        
+        preview_lines = [
+            f"📋 Расходы вне смены",
+            f"🏢 Клуб: {club_name}",
+            f"📅 Период: {period_text}",
+            f"",
+            f"Всего расходов: {len(expenses)}"
+        ]
+        
+        # Группируем по датам
+        expenses_by_date = {}
+        for exp in expenses:
+            exp_date = exp.get('expense_date')
+            if exp_date not in expenses_by_date:
+                expenses_by_date[exp_date] = []
+            expenses_by_date[exp_date].append(exp)
+        
+        for exp_date in sorted(expenses_by_date.keys()):
+            preview_lines.append(f"\n📅 {format_report_date(exp_date)}:")
+            date_total = Decimal('0')
+            for exp in expenses_by_date[exp_date]:
+                item = exp.get('expense_item', '')
+                amount = Decimal(str(exp.get('amount', 0)))
+                date_total += amount
+                preview_lines.append(f"  • {item}: {decimal_to_str(amount)}")
+            preview_lines.append(f"  Итого за день: {decimal_to_str(date_total)}")
+        
+        preview_lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
+        
+        await update.message.reply_text("\n".join(preview_lines))
+        
+        # Генерируем Excel файл
+        excel_bytes = excel_processor.export_off_shift_expenses_to_excel(
+            expenses, club_name, start_date, end_date
+        )
+        
+        filename = f"расходы_вне_смены_{club_name}_{start_date.strftime('%d.%m')}"
+        if start_date != end_date:
+            filename += f"-{end_date.strftime('%d.%m')}"
+        filename += ".xlsx"
+        
+        await update.message.reply_document(
+            excel_bytes,
+            filename=filename,
+            caption=f"📋 Расходы вне смены\n🏢 Клуб: {club_name}\n📅 Период: {period_text}"
+        )
+        
+        # Очищаем данные сессии
+        context.user_data.pop('view_expense_action', None)
+        context.user_data.pop('view_expense_club', None)
+        
+    except Exception as e:
+        logger.error(f"Error showing off-shift expenses report: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка при формировании отчета: {str(e)}"
+        )
+
+
 async def add_employee_from_text(update: Update, text: str):
     """Добавление сотрудника из текста пользователя"""
     result = employee_parser.extract_code_and_name(text)

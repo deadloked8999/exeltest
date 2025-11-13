@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import date
+from decimal import Decimal
 import hashlib
 from collections import defaultdict
 
@@ -563,9 +564,16 @@ class Database:
         """Полная очистка загруженных файлов и связанных данных"""
         with self.get_connection() as conn:
             with conn.cursor() as cur:
+                # Удаляем файлы (связанные данные удалятся через CASCADE)
                 cur.execute("DELETE FROM uploaded_files RETURNING id")
-                deleted = cur.fetchall()
-                return len(deleted)
+                deleted_files = cur.fetchall()
+                
+                # Удаляем расходы вне смены
+                cur.execute("DELETE FROM off_shift_expenses RETURNING id")
+                deleted_expenses = cur.fetchall()
+                
+                logger.info(f"Cleared {len(deleted_files)} files and {len(deleted_expenses)} off-shift expenses")
+                return len(deleted_files)
 
     def get_employee(self, employee_code: str) -> Optional[Dict[str, Any]]:
         """Получение одного сотрудника по коду"""
@@ -917,6 +925,44 @@ class Database:
                     ORDER BY upload_date DESC
                     """,
                     (user_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
+    # --- Работа с расходами вне смены ---
+
+    def add_off_shift_expense(self, user_id: int, username: str, club_name: str, 
+                              expense_item: str, amount: Decimal, payment_type: str,
+                              expense_date: Optional[date] = None) -> int:
+        """Добавление расхода вне смены"""
+        if expense_date is None:
+            expense_date = date.today()
+        
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO off_shift_expenses (user_id, username, club_name, expense_item, amount, payment_type, expense_date)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (user_id, username, club_name, expense_item, amount, payment_type, expense_date)
+                )
+                expense_id = cur.fetchone()[0]
+                logger.info(f"Off-shift expense added: ID={expense_id}, Club={club_name}, Item={expense_item}, Amount={amount}, Type={payment_type}")
+                return expense_id
+
+    def get_off_shift_expenses(self, club_name: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
+        """Получение расходов вне смены за период по клубу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT expense_item, amount, payment_type, expense_date, created_at
+                    FROM off_shift_expenses
+                    WHERE club_name = %s AND expense_date >= %s AND expense_date <= %s
+                    ORDER BY expense_date ASC, created_at ASC
+                    """,
+                    (club_name, start_date, end_date)
                 )
                 return [dict(row) for row in cur.fetchall()]
 

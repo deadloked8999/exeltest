@@ -181,4 +181,35 @@ CREATE TABLE IF NOT EXISTS employees (
 
 CREATE INDEX IF NOT EXISTS idx_employees_full_name ON employees(full_name);
 
+-- Таблица для расходов вне смены
+CREATE TABLE IF NOT EXISTS off_shift_expenses (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    username VARCHAR(255),
+    club_name VARCHAR(50) NOT NULL,
+    expense_item VARCHAR(255) NOT NULL,
+    amount NUMERIC(14,2) NOT NULL,
+    payment_type VARCHAR(50) NOT NULL,
+    expense_date DATE DEFAULT CURRENT_DATE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Добавляем колонку payment_type если её нет (для существующих баз)
+ALTER TABLE off_shift_expenses 
+    ADD COLUMN IF NOT EXISTS payment_type VARCHAR(50) DEFAULT 'Наличные';
+
+-- Обновляем существующие записи без payment_type
+UPDATE off_shift_expenses 
+SET payment_type = 'Наличные' 
+WHERE payment_type IS NULL;
+
+-- Делаем payment_type обязательным
+ALTER TABLE off_shift_expenses 
+    ALTER COLUMN payment_type SET NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_off_shift_expenses_user_id ON off_shift_expenses(user_id);
+CREATE INDEX IF NOT EXISTS idx_off_shift_expenses_club_name ON off_shift_expenses(club_name);
+CREATE INDEX IF NOT EXISTS idx_off_shift_expenses_date ON off_shift_expenses(expense_date);
+CREATE INDEX IF NOT EXISTS idx_off_shift_expenses_payment_type ON off_shift_expenses(payment_type);
+
 

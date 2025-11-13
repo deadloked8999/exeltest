@@ -1285,4 +1285,77 @@ class ExcelProcessor:
 
         return records
 
+    def export_off_shift_expenses_to_excel(self, expenses: List[Dict[str, Any]], club_name: str, start_date, end_date) -> bytes:
+        """Экспорт расходов вне смены в Excel"""
+        try:
+            from datetime import date
+            from openpyxl.styles import Font, Alignment
+            from decimal import Decimal
+            
+            # Подготавливаем данные для DataFrame
+            data = []
+            for exp in expenses:
+                data.append({
+                    'Статья расхода': exp.get('expense_item', ''),
+                    'Сумма': float(Decimal(str(exp.get('amount', 0))))
+                })
+            
+            df = pd.DataFrame(data)
+            
+            # Добавляем итоговую строку
+            total_amount = sum(Decimal(str(exp.get('amount', 0))) for exp in expenses)
+            total_row = pd.DataFrame({
+                'Статья расхода': ['ИТОГО'],
+                'Сумма': [float(total_amount)]
+            })
+            df = pd.concat([df, total_row], ignore_index=True)
+            
+            # Создание Excel файла в памяти
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                # Записываем данные, начиная со строки 3 (оставляем место для заголовка)
+                df.to_excel(writer, index=False, sheet_name='Расходы', startrow=2)
+                
+                # Получаем worksheet для форматирования
+                worksheet = writer.sheets['Расходы']
+                
+                # Форматируем период
+                start_str = start_date.strftime("%d.%m.%Y") if isinstance(start_date, date) else str(start_date)
+                if start_date == end_date:
+                    period_text = start_str
+                else:
+                    end_str = end_date.strftime("%d.%m.%Y") if isinstance(end_date, date) else str(end_date)
+                    period_text = f"{start_str} - {end_str}"
+                
+                # Добавляем заголовок
+                worksheet['A1'] = f'Дата (период): {period_text}'
+                worksheet['A1'].font = Font(bold=True, size=12)
+                
+                worksheet['B1'] = f'Клуб: {club_name}'
+                worksheet['B1'].font = Font(bold=True, size=12)
+                
+                # Делаем итоговую строку жирной
+                bold_font = Font(bold=True, size=11)
+                last_row = worksheet.max_row
+                for col_idx in range(1, worksheet.max_column + 1):
+                    cell = worksheet.cell(row=last_row, column=col_idx)
+                    cell.font = bold_font
+                    if col_idx == 1:  # Колонка "Статья расхода"
+                        cell.value = 'ИТОГО'
+                    elif col_idx == 2:  # Колонка "Сумма"
+                        cell.value = float(total_amount)
+                
+                # Выравнивание заголовков
+                for col_idx in range(1, worksheet.max_column + 1):
+                    header_cell = worksheet.cell(row=3, column=col_idx)
+                    header_cell.font = Font(bold=True)
+                    header_cell.alignment = Alignment(horizontal='center')
+            
+            output.seek(0)
+            return output.getvalue()
+        
+        except Exception as e:
+            logger.error(f"Error exporting off-shift expenses to Excel: {e}")
+            raise ValueError(f"Не удалось экспортировать расходы: {str(e)}")
+
 
