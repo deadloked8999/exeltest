@@ -95,6 +95,7 @@ QUERY_BLOCKS = [
     ("cash", "Инкассация"),
     ("debts", "Долги по персоналу"),
     ("notes", "Примечание"),
+    ("misc_expenses", "Прочие расходы"),
     ("totals", "Итоговый баланс")
 ]
 
@@ -1467,6 +1468,47 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         
         excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Примечания - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"примечания_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
+        return
+
+    if block_id == 'misc_expenses':
+        # Получаем содержимое файла из базы данных
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT file_content FROM uploaded_files WHERE id = %s", (file_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
+                    await target_message.reply_text("📭 Нет прочих расходов для этой даты.")
+                    return
+                file_content = result[0]
+        
+        # Извлекаем прочие расходы через парсер
+        misc_expenses_text = excel_processor.extract_misc_expenses_from_notes_after_total(file_content)
+        
+        if not misc_expenses_text:
+            await target_message.reply_text("📭 Нет прочих расходов для этой даты.")
+            return
+        
+        # Показываем предпросмотр
+        lines = [f"💸 Прочие расходы ({format_report_date(report_date)}) - {club_label}:"]
+        lines.append("")
+        # Добавляем текст прочих расходов, разбивая по строкам для лучшей читаемости
+        for line in misc_expenses_text.split('\n'):
+            if line.strip():
+                lines.append(f"• {line.strip()}")
+        
+        await target_message.reply_text("\n".join(lines))
+        
+        # Формируем Excel файл
+        # Каждая строка текста = одна строка в Excel
+        display_rows = []
+        for line in misc_expenses_text.split('\n'):
+            if line.strip():
+                display_rows.append({
+                    'Прочие расходы': line.strip()
+                })
+        
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Прочие расходы - {club_label}", club_label)
+        await target_message.reply_document(excel_bytes, filename=f"прочие_расходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
     if block_id == 'totals':

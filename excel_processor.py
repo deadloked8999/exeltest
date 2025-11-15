@@ -3,7 +3,7 @@
 """
 import pandas as pd
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from decimal import Decimal, InvalidOperation
 import io
 import re
@@ -1099,6 +1099,80 @@ class ExcelProcessor:
             'totals_match': totals_match
         }
 
+    def extract_misc_expenses_text_from_notes(self, file_content: bytes) -> Optional[str]:
+        """
+        Извлечение текста прочих расходов из блока Примечания
+        
+        Returns:
+            str: Текст прочих расходов (между заголовком "Прочие расходы:" и "Итого:")
+        """
+        try:
+            # Читаем Excel с правильной кодировкой
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='openpyxl', dtype=str)
+        except Exception as e:
+            logger.error(f"Error reading Excel for misc expenses: {e}")
+            return None
+
+        if df.empty:
+            return None
+
+        # Ищем блок "Прочие расходы" в примечаниях
+        misc_expenses_start_row = None
+        misc_expenses_col = None
+        
+        logger.info(f"Searching for 'Прочие расходы' block in Excel file, df shape: {df.shape}")
+        
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str):
+                    cell_lower = cell.strip().lower()
+                    # Логируем все ячейки с текстом "расход"
+                    if 'расход' in cell_lower:
+                        logger.info(f"Found cell with 'расход' at row {row_idx}, col {col_idx}: '{cell}'")
+                    
+                    if 'прочие расходы' in cell_lower:
+                        misc_expenses_start_row = row_idx + 1
+                        misc_expenses_col = col_idx
+                        logger.info(f"✅ Found 'Прочие расходы' at row {row_idx}, col {col_idx}")
+                        break
+            if misc_expenses_start_row is not None:
+                break
+        
+        if misc_expenses_start_row is None:
+            logger.info("❌ Misc expenses block 'Прочие расходы' not found in file")
+            return None
+        
+        # Извлекаем текст до строки "Итого:"
+        misc_expenses_lines = []
+        for row_idx in range(misc_expenses_start_row, len(df)):
+            cell = df.iloc[row_idx, misc_expenses_col] if df.shape[1] > misc_expenses_col else None
+            
+            if cell is None or (isinstance(cell, float) and pd.isna(cell)):
+                continue
+            
+            cell_text = str(cell).strip()
+            
+            # Останавливаемся на "Итого:"
+            if 'итого' in cell_text.lower():
+                logger.info(f"Found 'Итого' at row {row_idx}, stopping misc expenses extraction")
+                break
+            
+            # Пропускаем пустые строки
+            if not cell_text:
+                continue
+            
+            misc_expenses_lines.append(cell_text)
+        
+        if not misc_expenses_lines:
+            logger.info("No misc expenses data found")
+            return None
+        
+        misc_expenses_text = '\n'.join(misc_expenses_lines)
+        logger.info(f"Extracted misc expenses text ({len(misc_expenses_lines)} lines): {misc_expenses_text[:200]}")
+        
+        return misc_expenses_text
+    
     def extract_notes_entries(self, file_content: bytes) -> Dict[str, List[Dict[str, Any]]]:
         """Извлечение блока «Примечание»"""
         try:
@@ -1232,6 +1306,179 @@ class ExcelProcessor:
             'нал': with_cash,
             'extra': extra_notes
         }
+
+    def extract_misc_expenses_from_notes_after_total(self, file_content: bytes) -> Optional[str]:
+        """
+        Извлечение блока «Прочие расходы» из примечаний в колонке безнал после первого ИТОГО
+        
+        Returns:
+            str: Текст прочих расходов (от "ПРОЧИЕ РАСХОДЫ" до следующего "ИТОГО") или None
+        """
+        try:
+            df = pd.read_excel(io.BytesIO(file_content), sheet_name=0, header=None, engine='openpyxl')
+        except Exception as e:
+            logger.error(f"Error reading Excel for misc expenses from notes: {e}")
+            return None
+
+        if df.empty:
+            return None
+
+        # Ищем заголовок "Примечания" в любой колонке
+        start_row = None
+        notes_col = None
+        
+        for row_idx in range(len(df)):
+            for col_idx in range(df.shape[1]):
+                cell = df.iloc[row_idx, col_idx]
+                if isinstance(cell, str) and 'примечан' in cell.strip().lower():
+                    start_row = row_idx + 1
+                    notes_col = col_idx
+                    logger.info(f"Found 'Примечания' at row {row_idx}, col {col_idx}")
+                    break
+            if start_row is not None:
+                break
+
+        if start_row is None or notes_col is None:
+            logger.info("Notes block header not found")
+            return None
+
+        # Ищем строку с заголовками колонок (где "долг")
+        column_headers_row = None
+        for row_idx in range(start_row, len(df)):
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            right_cell = df.iloc[row_idx, notes_col + 1] if df.shape[1] > notes_col + 1 else None
+
+            if left_cell is None and right_cell is None:
+                continue
+
+            left_text = str(left_cell).strip().lower() if left_cell is not None else ''
+            right_text = str(right_cell).strip().lower() if right_cell is not None else ''
+
+            if 'долг' in left_text or 'долг' in right_text:
+                column_headers_row = row_idx
+                start_row = row_idx + 1
+                logger.info(f"Found debt headers at row {row_idx}, data starts at {start_row}")
+                break
+            else:
+                column_headers_row = row_idx
+                start_row = row_idx
+                break
+
+        # Ищем первое ИТОГО в левой колонке (безнал)
+        first_total_row = None
+        for row_idx in range(start_row, len(df)):
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            
+            if left_cell is None or (isinstance(left_cell, float) and pd.isna(left_cell)):
+                continue
+            
+            left_text = str(left_cell).strip() if isinstance(left_cell, str) else ''
+            left_lower = left_text.lower()
+            
+            # Проверяем на ключевые слова итогового баланса
+            if any(word in left_lower for word in ['доход', 'расход', 'прибыль']):
+                logger.info(f"Found balance keywords at row {row_idx}, stopping search")
+                break
+            
+            # Находим первое ИТОГО в левой колонке
+            if left_lower.startswith('итого'):
+                first_total_row = row_idx
+                logger.info(f"Found first ИТОГО in безнал column at row {row_idx}")
+                break
+
+        if first_total_row is None:
+            logger.info("First ИТОГО not found in безнал column")
+            return None
+
+        # После первого ИТОГО ищем "ПРОЧИЕ РАСХОДЫ" в левой колонке
+        # Пропускаем ВСЕ тексты, пустые строки, другие блоки и их ИТОГО между первым ИТОГО и "ПРОЧИЕ РАСХОДЫ"
+        misc_expenses_start_row = None
+        logger.info(f"Starting search for 'ПРОЧИЕ РАСХОДЫ' after first ИТОГО at row {first_total_row}")
+        
+        for row_idx in range(first_total_row + 1, len(df)):
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            
+            # Пропускаем пустые ячейки и продолжаем поиск
+            if left_cell is None or (isinstance(left_cell, float) and pd.isna(left_cell)):
+                continue
+            
+            left_text = str(left_cell).strip() if isinstance(left_cell, str) else ''
+            # Обрабатываем пустые строки после strip
+            if not left_text:
+                continue
+                
+            left_lower = left_text.lower()
+            # Убираем двоеточие и лишние пробелы для более гибкого поиска
+            left_lower_clean = left_lower.replace(':', '').strip()
+            
+            # ВАЖНО: Ищем ТОЛЬКО "прочие расходы", игнорируя ВСЕ остальное
+            # Проверяем различные варианты написания: "прочие расходы", "прочиерасходы", "прочий расход" и т.д.
+            # Игнорируем все промежуточные блоки, их записи и их ИТОГО
+            if ('прочие' in left_lower_clean and 'расход' in left_lower_clean) or 'прочие расходы' in left_lower:
+                misc_expenses_start_row = row_idx
+                logger.info(f"✅ Found 'ПРОЧИЕ РАСХОДЫ' at row {row_idx} (skipped {row_idx - first_total_row - 1} rows after first ИТОГО, text: '{left_text}')")
+                break
+            
+            # Проверяем, не дошли ли до конца блока примечаний (итоговый баланс)
+            # Останавливаемся только если это явно заголовок блока итогового баланса
+            # ВАЖНО: НЕ останавливаемся на промежуточных ИТОГО или других блоках
+            # Игнорируем все промежуточные блоки, их записи и их ИТОГО - продолжаем поиск
+            if left_lower in ['доход', 'расход', 'прибыль', 'чистая прибыль'] and left_lower not in ['прочие расходы']:
+                logger.info(f"Found balance header at row {row_idx}, stopping search for ПРОЧИЕ РАСХОДЫ")
+                break
+            
+            # ПРОПУСКАЕМ все промежуточные ИТОГО - они не останавливают поиск
+            # Логируем только для отладки
+            if left_lower.startswith('итого'):
+                if row_idx <= first_total_row + 30:
+                    logger.info(f"Row {row_idx}: found intermediate ИТОГО '{left_text}', skipping and continuing search")
+                continue
+            
+            # ВСЕ остальное (другие тексты, другие блоки, другие ИТОГО) - ПРОПУСКАЕМ и продолжаем поиск
+            # Логируем для отладки первые 30 встреченных текстов
+            if row_idx <= first_total_row + 30:
+                logger.info(f"Row {row_idx} after first ИТОГО: skipping text '{left_text[:50]}', continuing search for ПРОЧИЕ РАСХОДЫ")
+
+        if misc_expenses_start_row is None:
+            logger.info("ПРОЧИЕ РАСХОДЫ not found after first ИТОГО")
+            return None
+
+        # Извлекаем текст от "ПРОЧИЕ РАСХОДЫ" до следующего ИТОГО
+        misc_expenses_lines = []
+        for row_idx in range(misc_expenses_start_row, len(df)):
+            left_cell = df.iloc[row_idx, notes_col] if df.shape[1] > notes_col else None
+            
+            if left_cell is None or (isinstance(left_cell, float) and pd.isna(left_cell)):
+                continue
+            
+            left_text = str(left_cell).strip() if isinstance(left_cell, str) else ''
+            left_lower = left_text.lower()
+            
+            # Останавливаемся на следующем ИТОГО
+            if left_lower.startswith('итого'):
+                logger.info(f"Found next ИТОГО at row {row_idx}, stopping extraction")
+                break
+            
+            # Проверяем на ключевые слова итогового баланса
+            # ВАЖНО: исключаем "Прочие расходы" из проверки, так как там есть слово "расход"
+            if 'прочие расходы' not in left_lower and any(word in left_lower for word in ['доход', 'расход', 'прибыль']):
+                logger.info(f"Found balance keywords at row {row_idx}, stopping extraction")
+                break
+            
+            # Пропускаем пустые строки
+            if not left_text:
+                continue
+            
+            misc_expenses_lines.append(left_text)
+
+        if not misc_expenses_lines:
+            logger.info("No misc expenses data found")
+            return None
+
+        misc_expenses_text = '\n'.join(misc_expenses_lines)
+        logger.info(f"Extracted misc expenses from notes ({len(misc_expenses_lines)} lines): {misc_expenses_text[:200]}")
+        
+        return misc_expenses_text
 
     def extract_totals_summary(self, file_content: bytes) -> List[Dict[str, Any]]:
         """Извлечение блока «Итоговый баланс» - горизонтальный формат"""

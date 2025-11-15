@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeepSeekAPI:
-    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com"):
+    def __init__(self, api_key: str, base_url: str = "https://api.deepseek.com/v1"):
         """
         Инициализация DeepSeek API клиента
         
@@ -301,6 +301,126 @@ class DeepSeekAPI:
             formatted += f"📝 Показано {len(results)} из {total_count} записей\n"
         
         return formatted
+    
+    def parse_misc_expenses_from_notes(self, notes_text: str) -> Dict[str, Any]:
+        """
+        Парсинг прочих расходов из текста примечаний с использованием DeepSeek Chat API
+        
+        Args:
+            notes_text: Текст из блока примечаний
+        
+        Returns:
+            Dict с результатом: {
+                'success': bool,
+                'expenses': [{'item': str, 'amount': Decimal}, ...],
+                'total': Decimal,
+                'error': str (optional)
+            }
+        """
+        try:
+            system_prompt = """Ты - эксперт по анализу финансовых документов.
+Твоя задача - извлечь из текста прочие расходы, где каждая строка содержит статью расхода и сумму.
+
+Правила:
+1. Каждая строка содержит название статьи расхода и сумму
+2. Формат может быть разным: "депозит т.Анар 8.000" или "9.250-закуп бар,такси К2"
+3. Извлеки ВСЕ расходы из текста
+4. Верни результат в формате JSON (массив объектов):
+[
+    {"item": "депозит т.Анар", "amount": "8000"},
+    {"item": "депозит т.Руслан А", "amount": "8000"},
+    {"item": "закуп бар,такси К2", "amount": "9250"}
+]
+
+ВАЖНО:
+- Сумма должна быть числом БЕЗ пробелов и точек внутри (8000, а не 8.000)
+- Если сумма с точкой как разделитель тысяч (8.000) - преобразуй в 8000
+- Возвращай ТОЛЬКО JSON массив, без markdown и дополнительного текста"""
+
+            user_prompt = f"""Извлеки все прочие расходы из этого текста:
+
+{notes_text}
+
+Верни результат в формате JSON массива."""
+            
+            response = self.client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=1000
+            )
+            
+            content = response.choices[0].message.content.strip()
+            logger.info(f"DeepSeek misc expenses response: {content}")
+            
+            # Парсинг JSON ответа
+            if content.startswith("```json"):
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif content.startswith("```"):
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            expenses_list = json.loads(content)
+            
+            if not isinstance(expenses_list, list):
+                return {
+                    'success': False,
+                    'error': 'Неверный формат ответа от DeepSeek'
+                }
+            
+            # Преобразуем в нужный формат и считаем итого
+            expenses = []
+            total = Decimal('0')
+            
+            for exp in expenses_list:
+                item = exp.get('item', '').strip()
+                amount_str = exp.get('amount', '').strip()
+                
+                if not item or not amount_str:
+                    continue
+                
+                # Очищаем сумму от пробелов, точек (как разделителей тысяч)
+                amount_str = amount_str.replace(' ', '').replace('.', '').replace(',', '.')
+                
+                try:
+                    amount = Decimal(amount_str)
+                    expenses.append({
+                        'item': item,
+                        'amount': amount
+                    })
+                    total += amount
+                except:
+                    logger.warning(f"Could not parse amount: {amount_str}")
+                    continue
+            
+            if not expenses:
+                return {
+                    'success': False,
+                    'error': 'Не удалось извлечь расходы из текста'
+                }
+            
+            logger.info(f"Successfully parsed {len(expenses)} misc expenses, total: {total}")
+            
+            return {
+                'success': True,
+                'expenses': expenses,
+                'total': total
+            }
+        
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error: {e}")
+            return {
+                'success': False,
+                'error': 'Ошибка парсинга ответа от DeepSeek'
+            }
+        except Exception as e:
+            logger.error(f"Error in parse_misc_expenses_from_notes: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': f'Ошибка обработки текста: {str(e)}'
+            }
     
     def parse_receipt_from_text(self, text: str) -> Dict[str, Any]:
         """
