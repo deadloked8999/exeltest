@@ -429,6 +429,28 @@ class Database:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
+    def get_misc_expenses_period(self, club_name: str, start_date: date, end_date: date) -> List[Dict[str, Any]]:
+        """Получение данных блока «Прочие расходы» за период с группировкой по статьям"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT 
+                        mer.expense_item,
+                        SUM(mer.amount) as total_amount
+                    FROM misc_expenses_records mer
+                    JOIN uploaded_files uf ON mer.file_id = uf.id
+                    WHERE uf.club_name = %s
+                    AND uf.report_date >= %s
+                    AND uf.report_date <= %s
+                    AND mer.is_total = FALSE
+                    GROUP BY mer.expense_item
+                    ORDER BY mer.expense_item
+                    """,
+                    (club_name, start_date, end_date)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
     def save_taxi_expenses(self, file_id: int, taxi_amount: Decimal, taxi_percent_amount: Decimal, deposits_total: Decimal, total_amount: Decimal) -> None:
         """Сохранение данных блока «ТАКСИ»"""
         with self.get_connection() as conn:
@@ -1067,7 +1089,7 @@ class Database:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT expense_item, amount, payment_type, expense_date, created_at
+                    SELECT id, expense_item, amount, payment_type, expense_date, created_at
                     FROM off_shift_expenses
                     WHERE club_name = %s AND expense_date >= %s AND expense_date <= %s
                     ORDER BY expense_date ASC, created_at ASC
@@ -1075,5 +1097,65 @@ class Database:
                     (club_name, start_date, end_date)
                 )
                 return [dict(row) for row in cur.fetchall()]
+
+    def get_off_shift_expense_by_id(self, expense_id: int) -> Optional[Dict[str, Any]]:
+        """Получение расхода вне смены по ID"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, username, club_name, expense_item, amount, payment_type, expense_date, created_at
+                    FROM off_shift_expenses
+                    WHERE id = %s
+                    """,
+                    (expense_id,)
+                )
+                result = cur.fetchone()
+                return dict(result) if result else None
+
+    def update_off_shift_expense(self, expense_id: int, expense_item: str = None, 
+                                 amount: Decimal = None, payment_type: str = None, 
+                                 expense_date: date = None) -> bool:
+        """Обновление расхода вне смены"""
+        updates = []
+        params = []
+        
+        if expense_item is not None:
+            updates.append("expense_item = %s")
+            params.append(expense_item)
+        
+        if amount is not None:
+            updates.append("amount = %s")
+            params.append(amount)
+        
+        if payment_type is not None:
+            updates.append("payment_type = %s")
+            params.append(payment_type)
+        
+        if expense_date is not None:
+            updates.append("expense_date = %s")
+            params.append(expense_date)
+        
+        if not updates:
+            return False
+        
+        params.append(expense_id)
+        
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    UPDATE off_shift_expenses
+                    SET {', '.join(updates)}
+                    WHERE id = %s
+                    RETURNING id
+                    """,
+                    params
+                )
+                result = cur.fetchone()
+                if result:
+                    logger.info(f"Off-shift expense updated: ID={expense_id}")
+                    return True
+                return False
 
 

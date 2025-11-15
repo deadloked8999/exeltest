@@ -133,7 +133,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Запросы к данным", callback_data="main_queries")],
         [InlineKeyboardButton("👥 Сотрудники", callback_data="employee_menu")],
         [InlineKeyboardButton("💸 Добавить расходы", callback_data="add_expense")],
-        [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")]
+        [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")],
+        [InlineKeyboardButton("✏️ Редактировать расходы", callback_data="edit_off_shift_expenses")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -3054,6 +3055,56 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     caption=f"📊 Сводный отчет: ТАКСИ\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
                 )
             
+            elif block_id == 'misc_expenses':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по прочим расходам...")
+                
+                # Получаем данные за период из БД
+                misc_expenses = db.get_misc_expenses_period(club_name, start_date, end_date)
+                
+                if not misc_expenses:
+                    await processing_msg.edit_text(
+                        f"📭 Нет прочих расходов за период {format_report_date(start_date)} - {format_report_date(end_date)}\n"
+                        f"🏢 Клуб: {club_name}"
+                    )
+                    return
+                
+                # Формируем предпросмотр
+                total_amount = Decimal('0.00')
+                lines = [f"💸 Прочие расходы за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                
+                report_data = []
+                for exp in misc_expenses:
+                    expense_item = exp.get('expense_item', '')
+                    amount = Decimal(str(exp.get('total_amount', 0)))
+                    total_amount += amount
+                    lines.append(f"• {expense_item}: {decimal_to_str(amount)}")
+                    report_data.append({
+                        'Статья расхода': expense_item,
+                        'Сумма': decimal_to_float(amount)
+                    })
+                
+                lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
+                
+                # Добавляем итоговую строку в report_data
+                report_data.append({
+                    'Статья расхода': 'ИТОГО',
+                    'Сумма': decimal_to_float(total_amount)
+                })
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Формируем Excel файл
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "Прочие расходы"
+                )
+                
+                filename = f"прочие_расходы_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: Прочие расходы\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
             else:  # income (по умолчанию)
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
                 
@@ -3367,6 +3418,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("📌 Долги по персоналу", callback_data="report_block|debts")],
             [InlineKeyboardButton("📊 Итоговый баланс", callback_data="report_block|totals")],
             [InlineKeyboardButton("🚕 ТАКСИ", callback_data="report_block|taxi")],
+            [InlineKeyboardButton("💸 Прочие расходы", callback_data="report_block|misc_expenses")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -3396,7 +3448,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             'expenses': 'Расходы',
             'cash': 'Инкассация',
             'debts': 'Долги по персоналу',
-            'taxi': 'ТАКСИ'
+            'taxi': 'ТАКСИ',
+            'misc_expenses': 'Прочие расходы'
         }
         block_name = block_names.get(block_id, block_id)
         
@@ -3625,18 +3678,200 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
         context.user_data['view_expense_action'] = 'select_club'
 
+    elif data == "edit_off_shift_expenses":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏢 Москвич", callback_data="edit_expense_club|Москвич")],
+            [InlineKeyboardButton("🌟 Анора", callback_data="edit_expense_club|Анора")],
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        ])
+        await query.message.reply_text(
+            "✏️ Редактирование расходов вне смены\n\n"
+            "Выберите клуб:",
+            reply_markup=keyboard
+        )
+        context.user_data['view_expense_action'] = 'select_club'
+        context.user_data['edit_mode'] = True
+
     elif data.startswith("view_expense_club|"):
         selected_club = data.split("|", 1)[1]
         context.user_data['view_expense_club'] = selected_club
         context.user_data['view_expense_action'] = 'awaiting_date'
         await query.answer(f"✅ Выбран клуб: {selected_club}")
+        mode_text = "✏️ Редактирование расходов" if context.user_data.get('edit_mode') else "📋 Просмотр расходов"
         await query.message.reply_text(
-            f"📋 Просмотр расходов вне смены\n"
+            f"{mode_text}\n"
             f"🏢 Клуб: {selected_club}\n\n"
             "Введите дату или период:\n"
             "• Дата: 1,11 или 1.11 (1 ноября)\n"
             "• Период: 1.11-5.12 или 1,11-5,12"
         )
+    
+    elif data.startswith("edit_expense_club|"):
+        selected_club = data.split("|", 1)[1]
+        context.user_data['view_expense_club'] = selected_club
+        context.user_data['view_expense_action'] = 'awaiting_date'
+        context.user_data['edit_mode'] = True
+        await query.answer(f"✅ Выбран клуб: {selected_club}")
+        await query.message.reply_text(
+            f"✏️ Редактирование расходов вне смены\n"
+            f"🏢 Клуб: {selected_club}\n\n"
+            "Введите дату или период:\n"
+            "• Дата: 1,11 или 1.11 (1 ноября)\n"
+            "• Период: 1.11-5.12 или 1,11-5,12"
+        )
+    
+    elif data.startswith("edit_expense|"):
+        expense_id = int(data.split("|", 1)[1])
+        expense = db.get_off_shift_expense_by_id(expense_id)
+        
+        if not expense:
+            await query.answer("❌ Расход не найден")
+            await query.message.reply_text("❌ Расход не найден. Возможно, он был удален.")
+            return
+        
+        context.user_data['editing_expense_id'] = expense_id
+        context.user_data['editing_expense'] = expense
+        
+        expense_item = expense.get('expense_item', '')
+        amount = decimal_to_str(expense.get('amount', 0))
+        payment_type = expense.get('payment_type', '')
+        expense_date = format_report_date(expense.get('expense_date'))
+        club_name = expense.get('club_name', '')
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Изменить название", callback_data=f"edit_expense_field|{expense_id}|item")],
+            [InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit_expense_field|{expense_id}|amount")],
+            [InlineKeyboardButton("✏️ Изменить тип оплаты", callback_data=f"edit_expense_field|{expense_id}|payment_type")],
+            [InlineKeyboardButton("✏️ Изменить дату", callback_data=f"edit_expense_field|{expense_id}|date")],
+            [InlineKeyboardButton("❌ Удалить расход", callback_data=f"delete_expense|{expense_id}")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+        ])
+        
+        await query.answer("✏️ Редактирование расхода")
+        await query.message.reply_text(
+            f"✏️ Редактирование расхода\n\n"
+            f"📄 Название: {expense_item}\n"
+            f"💰 Сумма: {amount}\n"
+            f"💳 Тип оплаты: {payment_type}\n"
+            f"📅 Дата: {expense_date}\n"
+            f"🏢 Клуб: {club_name}\n\n"
+            "Что хотите изменить?",
+            reply_markup=keyboard
+        )
+    
+    elif data.startswith("edit_expense_field|"):
+        parts = data.split("|")
+        expense_id = int(parts[1])
+        field = parts[2]
+        
+        expense = db.get_off_shift_expense_by_id(expense_id)
+        if not expense:
+            await query.answer("❌ Расход не найден")
+            return
+        
+        context.user_data['editing_expense_id'] = expense_id
+        context.user_data['editing_expense_field'] = field
+        
+        if field == 'item':
+            context.user_data['editing_expense_action'] = 'edit_item'
+            await query.answer("✏️ Введите новое название")
+            await query.message.reply_text(
+                f"✏️ Редактирование названия\n\n"
+                f"Текущее значение: {expense.get('expense_item', '')}\n\n"
+                "Введите новое название расхода:"
+            )
+        elif field == 'amount':
+            context.user_data['editing_expense_action'] = 'edit_amount'
+            await query.answer("✏️ Введите новую сумму")
+            await query.message.reply_text(
+                f"✏️ Редактирование суммы\n\n"
+                f"Текущее значение: {decimal_to_str(expense.get('amount', 0))}\n\n"
+                "Введите новую сумму (только число):"
+            )
+        elif field == 'payment_type':
+            context.user_data['editing_expense_action'] = 'edit_payment_type'
+            await query.answer("✏️ Выберите тип оплаты")
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("💵 Наличные", callback_data=f"set_payment_type|{expense_id}|Наличные")],
+                [InlineKeyboardButton("💳 Б/Н", callback_data=f"set_payment_type|{expense_id}|Б/Н")],
+                [InlineKeyboardButton("⬅️ Отмена", callback_data=f"edit_expense|{expense_id}")]
+            ])
+            await query.message.reply_text(
+                f"✏️ Редактирование типа оплаты\n\n"
+                f"Текущее значение: {expense.get('payment_type', '')}\n\n"
+                "Выберите новый тип оплаты:",
+                reply_markup=keyboard
+            )
+        elif field == 'date':
+            context.user_data['editing_expense_action'] = 'edit_date'
+            await query.answer("✏️ Введите новую дату")
+            await query.message.reply_text(
+                f"✏️ Редактирование даты\n\n"
+                f"Текущее значение: {format_report_date(expense.get('expense_date'))}\n\n"
+                "Введите новую дату в формате:\n"
+                "• 1,11 или 1.11 (1 ноября текущего года)\n"
+                "• 15.11.2024 (полная дата)"
+            )
+    
+    elif data.startswith("set_payment_type|"):
+        parts = data.split("|")
+        expense_id = int(parts[1])
+        payment_type = parts[2]
+        
+        success = db.update_off_shift_expense(expense_id, payment_type=payment_type)
+        if success:
+            await query.answer("✅ Тип оплаты обновлен")
+            expense = db.get_off_shift_expense_by_id(expense_id)
+            expense_item = expense.get('expense_item', '')
+            amount = decimal_to_str(expense.get('amount', 0))
+            expense_date = format_report_date(expense.get('expense_date'))
+            club_name = expense.get('club_name', '')
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Изменить название", callback_data=f"edit_expense_field|{expense_id}|item")],
+                [InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit_expense_field|{expense_id}|amount")],
+                [InlineKeyboardButton("✏️ Изменить тип оплаты", callback_data=f"edit_expense_field|{expense_id}|payment_type")],
+                [InlineKeyboardButton("✏️ Изменить дату", callback_data=f"edit_expense_field|{expense_id}|date")],
+                [InlineKeyboardButton("❌ Удалить расход", callback_data=f"delete_expense|{expense_id}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+            ])
+            
+            await query.message.reply_text(
+                f"✅ Тип оплаты обновлен!\n\n"
+                f"📄 Название: {expense_item}\n"
+                f"💰 Сумма: {amount}\n"
+                f"💳 Тип оплаты: {payment_type}\n"
+                f"📅 Дата: {expense_date}\n"
+                f"🏢 Клуб: {club_name}\n\n"
+                "Что хотите изменить?",
+                reply_markup=keyboard
+            )
+        else:
+            await query.answer("❌ Ошибка при обновлении")
+            await query.message.reply_text("❌ Ошибка при обновлении типа оплаты")
+    
+    elif data.startswith("delete_expense|"):
+        expense_id = int(data.split("|", 1)[1])
+        expense = db.get_off_shift_expense_by_id(expense_id)
+        
+        if not expense:
+            await query.answer("❌ Расход не найден")
+            return
+        
+        # Удаляем из БД
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM off_shift_expenses WHERE id = %s", (expense_id,))
+        
+        expense_item = expense.get('expense_item', '')
+        await query.answer("✅ Расход удален")
+        await query.message.reply_text(
+            f"✅ Расход удален:\n"
+            f"📄 {expense_item}"
+        )
+        context.user_data.pop('editing_expense_id', None)
+        context.user_data.pop('editing_expense', None)
+    
     else:
         await query.message.reply_text("Команда не поддерживается. Используйте меню ниже.")
 
@@ -3813,6 +4048,135 @@ async def handle_expense_text_action(update: Update, context: ContextTypes.DEFAU
             preview_lines.append("Напишите 'сохранить' для сохранения или введите еще расходы")
             
             await update.message.reply_text("\n".join(preview_lines))
+    
+    # Обработка редактирования расходов вне смены
+    editing_action = context.user_data.get('editing_expense_action')
+    expense_id = context.user_data.get('editing_expense_id')
+    
+    if editing_action == 'edit_item':
+        # Редактирование названия расхода
+        new_item = user_message.strip()
+        if not new_item:
+            await update.message.reply_text("❌ Название не может быть пустым. Попробуйте еще раз:")
+            return
+        
+        success = db.update_off_shift_expense(expense_id, expense_item=new_item)
+        if success:
+            expense = db.get_off_shift_expense_by_id(expense_id)
+            expense_item = expense.get('expense_item', '')
+            amount = decimal_to_str(expense.get('amount', 0))
+            payment_type = expense.get('payment_type', '')
+            expense_date = format_report_date(expense.get('expense_date'))
+            club_name = expense.get('club_name', '')
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Изменить название", callback_data=f"edit_expense_field|{expense_id}|item")],
+                [InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit_expense_field|{expense_id}|amount")],
+                [InlineKeyboardButton("✏️ Изменить тип оплаты", callback_data=f"edit_expense_field|{expense_id}|payment_type")],
+                [InlineKeyboardButton("✏️ Изменить дату", callback_data=f"edit_expense_field|{expense_id}|date")],
+                [InlineKeyboardButton("❌ Удалить расход", callback_data=f"delete_expense|{expense_id}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+            ])
+            
+            await update.message.reply_text(
+                f"✅ Название обновлено!\n\n"
+                f"📄 Название: {expense_item}\n"
+                f"💰 Сумма: {amount}\n"
+                f"💳 Тип оплаты: {payment_type}\n"
+                f"📅 Дата: {expense_date}\n"
+                f"🏢 Клуб: {club_name}\n\n"
+                "Что хотите изменить?",
+                reply_markup=keyboard
+            )
+            context.user_data.pop('editing_expense_action', None)
+        else:
+            await update.message.reply_text("❌ Ошибка при обновлении названия")
+    
+    elif editing_action == 'edit_amount':
+        # Редактирование суммы расхода
+        try:
+            new_amount = Decimal(user_message.strip().replace(',', '.').replace(' ', ''))
+            if new_amount <= 0:
+                raise ValueError("Сумма должна быть больше 0")
+            
+            success = db.update_off_shift_expense(expense_id, amount=new_amount)
+            if success:
+                expense = db.get_off_shift_expense_by_id(expense_id)
+                expense_item = expense.get('expense_item', '')
+                amount = decimal_to_str(expense.get('amount', 0))
+                payment_type = expense.get('payment_type', '')
+                expense_date = format_report_date(expense.get('expense_date'))
+                club_name = expense.get('club_name', '')
+                
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ Изменить название", callback_data=f"edit_expense_field|{expense_id}|item")],
+                    [InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit_expense_field|{expense_id}|amount")],
+                    [InlineKeyboardButton("✏️ Изменить тип оплаты", callback_data=f"edit_expense_field|{expense_id}|payment_type")],
+                    [InlineKeyboardButton("✏️ Изменить дату", callback_data=f"edit_expense_field|{expense_id}|date")],
+                    [InlineKeyboardButton("❌ Удалить расход", callback_data=f"delete_expense|{expense_id}")],
+                    [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+                ])
+                
+                await update.message.reply_text(
+                    f"✅ Сумма обновлена!\n\n"
+                    f"📄 Название: {expense_item}\n"
+                    f"💰 Сумма: {amount}\n"
+                    f"💳 Тип оплаты: {payment_type}\n"
+                    f"📅 Дата: {expense_date}\n"
+                    f"🏢 Клуб: {club_name}\n\n"
+                    "Что хотите изменить?",
+                    reply_markup=keyboard
+                )
+                context.user_data.pop('editing_expense_action', None)
+            else:
+                await update.message.reply_text("❌ Ошибка при обновлении суммы")
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Неверный формат суммы!\n"
+                "Введите число, например: 1500 или 1500.50"
+            )
+    
+    elif editing_action == 'edit_date':
+        # Редактирование даты расхода
+        new_date = parse_report_date_from_text(user_message)
+        if new_date is None:
+            await update.message.reply_text(
+                "❌ Не удалось распознать дату.\n"
+                "Используйте формат: 1,11 или 1.11 (1 ноября текущего года)"
+            )
+            return
+        
+        success = db.update_off_shift_expense(expense_id, expense_date=new_date)
+        if success:
+            expense = db.get_off_shift_expense_by_id(expense_id)
+            expense_item = expense.get('expense_item', '')
+            amount = decimal_to_str(expense.get('amount', 0))
+            payment_type = expense.get('payment_type', '')
+            expense_date = format_report_date(expense.get('expense_date'))
+            club_name = expense.get('club_name', '')
+            
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Изменить название", callback_data=f"edit_expense_field|{expense_id}|item")],
+                [InlineKeyboardButton("✏️ Изменить сумму", callback_data=f"edit_expense_field|{expense_id}|amount")],
+                [InlineKeyboardButton("✏️ Изменить тип оплаты", callback_data=f"edit_expense_field|{expense_id}|payment_type")],
+                [InlineKeyboardButton("✏️ Изменить дату", callback_data=f"edit_expense_field|{expense_id}|date")],
+                [InlineKeyboardButton("❌ Удалить расход", callback_data=f"delete_expense|{expense_id}")],
+                [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
+            ])
+            
+            await update.message.reply_text(
+                f"✅ Дата обновлена!\n\n"
+                f"📄 Название: {expense_item}\n"
+                f"💰 Сумма: {amount}\n"
+                f"💳 Тип оплаты: {payment_type}\n"
+                f"📅 Дата: {expense_date}\n"
+                f"🏢 Клуб: {club_name}\n\n"
+                "Что хотите изменить?",
+                reply_markup=keyboard
+            )
+            context.user_data.pop('editing_expense_action', None)
+        else:
+            await update.message.reply_text("❌ Ошибка при обновлении даты")
 
 
 async def save_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3956,7 +4320,8 @@ async def show_off_shift_expenses_report(update: Update, context: ContextTypes.D
                 item = exp.get('expense_item', '')
                 amount = Decimal(str(exp.get('amount', 0)))
                 date_total += amount
-                preview_lines.append(f"  • {item}: {decimal_to_str(amount)}")
+                exp_id = exp.get('id')
+                preview_lines.append(f"  • [{exp_id}] {item}: {decimal_to_str(amount)}")
             preview_lines.append(f"  Итого за день: {decimal_to_str(date_total)}")
         
         preview_lines.append(f"\n💰 ИТОГО: {decimal_to_str(total_amount)}")
@@ -3979,9 +4344,31 @@ async def show_off_shift_expenses_report(update: Update, context: ContextTypes.D
             caption=f"📋 Расходы вне смены\n🏢 Клуб: {club_name}\n📅 Период: {period_text}"
         )
         
-        # Очищаем данные сессии
+        # Добавляем кнопки для редактирования расходов
+        keyboard = []
+        for exp in expenses:
+            exp_id = exp.get('id')
+            item = exp.get('expense_item', '')
+            amount = Decimal(str(exp.get('amount', 0)))
+            payment_type = exp.get('payment_type', '')
+            exp_date = exp.get('expense_date')
+            button_text = f"✏️ [{exp_id}] {item} - {decimal_to_str(amount)} ({payment_type})"
+            # Обрезаем текст кнопки если слишком длинный (макс 64 символа для Telegram)
+            if len(button_text) > 64:
+                button_text = f"✏️ [{exp_id}] {item[:30]}... - {decimal_to_str(amount)}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"edit_expense|{exp_id}")])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")])
+        
+        await update.message.reply_text(
+            "✏️ Выберите расход для редактирования:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        # Очищаем данные сессии просмотра
         context.user_data.pop('view_expense_action', None)
         context.user_data.pop('view_expense_club', None)
+        context.user_data.pop('edit_mode', None)
         
     except Exception as e:
         logger.error(f"Error showing off-shift expenses report: {e}")
