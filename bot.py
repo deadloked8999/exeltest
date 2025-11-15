@@ -940,6 +940,8 @@ async def generate_payment_types_period_report(club_name: str, start_date: date,
     
     # Словарь для суммирования: {payment_type: sum}
     payment_summary = defaultdict(Decimal)
+    # Отдельная сумма для "ИТОГО КАССА" (не участвует в общем итоге)
+    cash_total_amount = Decimal('0')
     # Список для сохранения порядка типов оплат (берем из файла с максимумом типов)
     payment_order = []
     
@@ -955,9 +957,15 @@ async def generate_payment_types_period_report(club_name: str, start_date: date,
             payment_type = rec.get('payment_type')
             amount = rec.get('amount') or Decimal('0')
             is_total = rec.get('is_total', False)
+            is_cash_total = rec.get('is_cash_total', False)
             
             if is_total:
                 # Это итоговая строка - пропускаем, посчитаем сами
+                continue
+            
+            if is_cash_total:
+                # Это "ИТОГО КАССА" - суммируем отдельно, но не добавляем в payment_summary
+                cash_total_amount += amount
                 continue
             
             # Суммируем
@@ -992,7 +1000,14 @@ async def generate_payment_types_period_report(club_name: str, start_date: date,
             'Сумма': decimal_to_float(amt)
         })
     
-    # Добавляем ИТОГО
+    # Добавляем "ИТОГО КАССА" (если есть) - показываем, но не считаем в общий итог
+    if cash_total_amount > 0:
+        display_rows.append({
+            'Тип оплаты': 'ИТОГО КАССА',
+            'Сумма': decimal_to_float(cash_total_amount)
+        })
+    
+    # Добавляем ИТОГО (только из обычных типов оплат, без "ИТОГО КАССА")
     display_rows.append({
         'Тип оплаты': 'ИТОГО',
         'Сумма': decimal_to_float(total_amount)
@@ -1971,6 +1986,81 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_lines.append(f"Финансовый результат (Итого доходы - Расходы): {format(balance, '0.0f')}")
 
             summary_lines.append("\n".join(msg_lines))
+        
+        # НОВАЯ ЛОГИКА: Обработка прочих расходов из примечаний с помощью DeepSeek
+        misc_expenses_text = excel_processor.extract_misc_expenses_text_from_notes(bytes(file_content))
+        if misc_expenses_text:
+            logger.info(f"Found misc expenses text in notes: {misc_expenses_text[:200]}")
+            
+            # Парсим через DeepSeek API
+            from deepseek_api import DeepSeekAPI
+            import os
+            
+            # Используем API ключ из переменной окружения или дефолтный
+            deepseek_api_key = 'sk-7c638331eef3495d9ae00f39efba407d'
+            deepseek = DeepSeekAPI(api_key=deepseek_api_key)
+            
+            parse_result = deepseek.parse_misc_expenses_from_notes(misc_expenses_text)
+            
+            if parse_result['success']:
+                parsed_expenses = parse_result['expenses']
+                parsed_total = parse_result['total']
+                
+                # Получаем сумму "Прочие расходы" из блока ДОХОДЫ
+                income_misc_expense = None
+                if income_records:
+                    income_misc_expense = next(
+                        (record['amount'] for record in income_records 
+                         if 'прочие расходы' in record['category'].strip().lower()),
+                        None
+                    )
+                
+                # Сравниваем суммы
+                amounts_match = False
+                if income_misc_expense is not None:
+                    amounts_match = abs(parsed_total - income_misc_expense) < Decimal('0.01')
+                
+                # Сохраняем информацию для подтверждения пользователем
+                context.user_data['pending_misc_expenses'] = {
+                    'file_id': file_id,
+                    'expenses': parsed_expenses,
+                    'parsed_total': parsed_total,
+                    'income_misc_expense': income_misc_expense,
+                    'amounts_match': amounts_match
+                }
+                
+                # Формируем сообщение для пользователя
+                if amounts_match:
+                    msg = "✅ Прочие расходы распознаны DeepSeek и суммы совпадают!\n\n"
+                else:
+                    msg = "⚠️ Прочие расходы распознаны, но суммы НЕ совпадают!\n\n"
+                
+                msg += "📋 Распознанные расходы:\n"
+                for exp in parsed_expenses:
+                    msg += f"• {exp['item']}: {decimal_to_str(exp['amount'])}\n"
+                
+                msg += f"\n💰 Итого (DeepSeek): {decimal_to_str(parsed_total)}\n"
+                
+                if income_misc_expense is not None:
+                    msg += f"💰 Итого (из блока Доходы): {decimal_to_str(income_misc_expense)}\n"
+                
+                if amounts_match:
+                    msg += "\n✅ Суммы совпадают!"
+                else:
+                    msg += "\n⚠️ Суммы НЕ совпадают! Проверьте данные."
+                
+                msg += "\n\nПодтвердить и сохранить эти расходы?"
+                
+                keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_misc_expenses")],
+                    [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_misc_expenses")],
+                    [InlineKeyboardButton("❌ Отменить", callback_data="cancel_misc_expenses")]
+                ])
+                
+                await update.message.reply_text(msg, reply_markup=keyboard)
+            else:
+                logger.warning(f"Failed to parse misc expenses: {parse_result.get('error')}")
+                summary_lines.append(f"⚠️ Не удалось распознать прочие расходы: {parse_result.get('error')}")
 
         staff_debts_data = excel_processor.extract_staff_debts(bytes(file_content))
         if staff_debts_data.get('records'):
@@ -2092,6 +2182,76 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(
             f"🗓 Дата отчёта установлена: {format_report_date(report_date)}"
         )
+        return
+    
+    # Обработка редактирования прочих расходов
+    if context.user_data.get('editing_misc_expenses'):
+        pending = context.user_data.get('pending_misc_expenses')
+        if not pending:
+            await update.message.reply_text("❌ Данные не найдены")
+            context.user_data.pop('editing_misc_expenses', None)
+            return
+        
+        # Парсим введенный текст (простой парсинг: каждая строка - статья и сумма)
+        lines = user_message.strip().split('\n')
+        edited_expenses = []
+        total = Decimal('0')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Ищем число в конце строки
+            match = re.search(r'(\d+[\s,.]?\d*)\s*$', line)
+            if match:
+                amount_str = match.group(1).replace(' ', '').replace(',', '.')
+                # Убираем точки как разделители тысяч
+                if '.' in amount_str and amount_str.index('.') < len(amount_str) - 3:
+                    amount_str = amount_str.replace('.', '')
+                
+                try:
+                    amount = Decimal(amount_str)
+                    item = line[:match.start()].strip()
+                    
+                    if item:
+                        edited_expenses.append({
+                            'item': item,
+                            'amount': amount
+                        })
+                        total += amount
+                except:
+                    continue
+        
+        if not edited_expenses:
+            await update.message.reply_text(
+                "❌ Не удалось распознать расходы. Попробуйте еще раз.\n\n"
+                "Формат: статья расхода 1000"
+            )
+            return
+        
+        # Обновляем данные
+        pending['expenses'] = edited_expenses
+        pending['parsed_total'] = total
+        context.user_data['pending_misc_expenses'] = pending
+        context.user_data.pop('editing_misc_expenses', None)
+        
+        # Показываем обновленные данные
+        msg = "✅ Расходы обновлены!\n\n"
+        msg += "📋 Новые расходы:\n"
+        for exp in edited_expenses:
+            msg += f"• {exp['item']}: {decimal_to_str(exp['amount'])}\n"
+        
+        msg += f"\n💰 Итого: {decimal_to_str(total)}\n\n"
+        msg += "Подтвердить и сохранить?"
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_misc_expenses")],
+            [InlineKeyboardButton("✏️ Редактировать еще раз", callback_data="edit_misc_expenses")],
+            [InlineKeyboardButton("❌ Отменить", callback_data="cancel_misc_expenses")]
+        ])
+        
+        await update.message.reply_text(msg, reply_markup=keyboard)
         return
 
     if user_message.strip() == BUTTON_FILES:
@@ -3017,6 +3177,62 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await query.message.reply_text(
             "✏️ Введите новую сумму (только число):"
         )
+    
+    elif data == "confirm_misc_expenses":
+        # Подтверждение прочих расходов
+        pending = context.user_data.get('pending_misc_expenses')
+        if not pending:
+            await query.answer("❌ Данные не найдены")
+            return
+        
+        file_id = pending['file_id']
+        expenses = pending['expenses']
+        
+        # Сохраняем каждый расход в expense_records
+        for exp in expenses:
+            db.save_expense_records(file_id, [{
+                'expense_item': exp['item'],
+                'amount': exp['amount']
+            }])
+        
+        context.user_data.pop('pending_misc_expenses', None)
+        
+        await query.answer("✅ Сохранено!")
+        await query.message.reply_text(
+            f"✅ Прочие расходы сохранены!\n\n"
+            f"Добавлено расходов: {len(expenses)}\n"
+            f"💰 Итого: {decimal_to_str(pending['parsed_total'])}"
+        )
+    
+    elif data == "edit_misc_expenses":
+        # Редактирование прочих расходов
+        pending = context.user_data.get('pending_misc_expenses')
+        if not pending:
+            await query.answer("❌ Данные не найдены")
+            return
+        
+        context.user_data['editing_misc_expenses'] = True
+        
+        expenses = pending['expenses']
+        msg = "✏️ Редактирование прочих расходов\n\n"
+        msg += "Текущие расходы:\n"
+        for i, exp in enumerate(expenses, 1):
+            msg += f"{i}. {exp['item']}: {decimal_to_str(exp['amount'])}\n"
+        
+        msg += "\n📝 Отправьте все расходы заново в формате:\n"
+        msg += "статья расхода 1000\n"
+        msg += "другая статья 2000\n"
+        msg += "...\n\n"
+        msg += "Каждая строка - одна статья расхода и сумма."
+        
+        await query.answer("✏️ Редактирование")
+        await query.message.reply_text(msg)
+    
+    elif data == "cancel_misc_expenses":
+        # Отмена прочих расходов
+        context.user_data.pop('pending_misc_expenses', None)
+        await query.answer("❌ Отменено")
+        await query.message.reply_text("❌ Прочие расходы не сохранены.")
 
     elif data == "view_off_shift_expenses":
         keyboard = InlineKeyboardMarkup([
