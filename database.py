@@ -11,8 +11,10 @@ from decimal import Decimal
 import hashlib
 from collections import defaultdict
 
-logging.basicConfig(level=logging.INFO)
+# Логирование настроено в bot.py, здесь только получаем logger
+import logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class Database:
@@ -426,6 +428,71 @@ class Database:
                     (file_id,)
                 )
                 return [dict(row) for row in cur.fetchall()]
+
+    def save_taxi_expenses(self, file_id: int, taxi_amount: Decimal, taxi_percent_amount: Decimal, deposits_total: Decimal, total_amount: Decimal) -> None:
+        """Сохранение данных блока «ТАКСИ»"""
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                # Удаляем существующую запись для этого файла
+                cur.execute(
+                    "DELETE FROM taxi_expenses WHERE file_id = %s",
+                    (file_id,)
+                )
+                
+                # Вставляем новую запись
+                cur.execute(
+                    """
+                    INSERT INTO taxi_expenses (file_id, taxi_amount, taxi_percent_amount, deposits_total, total_amount)
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (file_id, taxi_amount, taxi_percent_amount, deposits_total, total_amount)
+                )
+
+    def get_taxi_expenses(self, file_id: int) -> Optional[Dict[str, Any]]:
+        """Получение данных блока «ТАКСИ» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT taxi_amount, taxi_percent_amount, deposits_total, total_amount, created_at
+                    FROM taxi_expenses
+                    WHERE file_id = %s
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (file_id,)
+                )
+                result = cur.fetchone()
+                return dict(result) if result else None
+
+    def get_taxi_expenses_period(self, club_name: str, start_date: date, end_date: date) -> Dict[str, Any]:
+        """Получение данных блока «ТАКСИ» за период"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT 
+                        COALESCE(SUM(taxi_amount), 0) as total_taxi_amount,
+                        COALESCE(SUM(taxi_percent_amount), 0) as total_taxi_percent_amount,
+                        COALESCE(SUM(deposits_total), 0) as total_deposits_total,
+                        COALESCE(SUM(total_amount), 0) as total_amount
+                    FROM taxi_expenses te
+                    JOIN uploaded_files uf ON te.file_id = uf.id
+                    WHERE uf.club_name = %s
+                    AND uf.report_date >= %s
+                    AND uf.report_date <= %s
+                    """,
+                    (club_name, start_date, end_date)
+                )
+                result = cur.fetchone()
+                if result:
+                    return dict(result)
+                return {
+                    'total_taxi_amount': Decimal('0.00'),
+                    'total_taxi_percent_amount': Decimal('0.00'),
+                    'total_deposits_total': Decimal('0.00'),
+                    'total_amount': Decimal('0.00')
+                }
 
     def save_cash_collection(self, file_id: int, records: List[Dict[str, Any]]) -> None:
         """Сохранение данных блока «Инкассация»"""

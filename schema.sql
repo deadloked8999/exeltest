@@ -110,6 +110,19 @@ CREATE TABLE IF NOT EXISTS misc_expenses_records (
 
 CREATE INDEX IF NOT EXISTS idx_misc_expenses_records_file_id ON misc_expenses_records(file_id);
 
+-- Таблица для блока «ТАКСИ»
+CREATE TABLE IF NOT EXISTS taxi_expenses (
+    id SERIAL PRIMARY KEY,
+    file_id INTEGER REFERENCES uploaded_files(id) ON DELETE CASCADE,
+    taxi_amount NUMERIC(14,2) DEFAULT 0,
+    taxi_percent_amount NUMERIC(14,2) DEFAULT 0,
+    deposits_total NUMERIC(14,2) DEFAULT 0,
+    total_amount NUMERIC(14,2) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_taxi_expenses_file_id ON taxi_expenses(file_id);
+
 -- Таблица для блока «Инкассация»
 CREATE TABLE IF NOT EXISTS cash_collection (
     id SERIAL PRIMARY KEY,

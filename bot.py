@@ -36,12 +36,38 @@ import pandas as pd
 # Загрузка переменных окружения
 load_dotenv()
 
-# Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Настройка логирования - ВЫВОД В ТЕРМИНАЛ POWERSHELL
+import sys
+
+# Создаем root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Очищаем старые handlers
+root_logger.handlers.clear()
+
+# Создаем handler для вывода в терминал
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.INFO)
+
+# Создаем форматтер
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+console_handler.setFormatter(formatter)
+
+# Добавляем handler к root logger
+root_logger.addHandler(console_handler)
+
+# Получаем logger для текущего модуля
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Настраиваем логирование для всех модулей
+for module_name in ['excel_processor', 'database', '__main__']:
+    module_logger = logging.getLogger(module_name)
+    module_logger.setLevel(logging.INFO)
+    module_logger.propagate = True  # Важно! Чтобы логи шли в root logger
+
+logger.info("=== LOGGING INITIALIZED - ВСЕ ЛОГИ ВЫВОДЯТСЯ В ТЕРМИНАЛ ===")
 
 ACCESS_PASSWORD = os.getenv('BOT_ACCESS_PASSWORD', '1801')
 AUTHORIZED_USERS: Set[int] = set()
@@ -96,7 +122,8 @@ QUERY_BLOCKS = [
     ("debts", "Долги по персоналу"),
     ("notes", "Примечание"),
     ("misc_expenses", "Прочие расходы"),
-    ("totals", "Итоговый баланс")
+    ("totals", "Итоговый баланс"),
+    ("taxi", "ТАКСИ")
 ]
 
 
@@ -125,6 +152,7 @@ def get_files_keyboard() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("📄 Список файлов", callback_data="files_list")],
         [InlineKeyboardButton("📅 Даты отчётов по клубу", callback_data="files_dates_by_club")],
+        [InlineKeyboardButton("🔄 Обновить все файлы", callback_data="files_reprocess_all")],
         [InlineKeyboardButton("🧼 Очистить все файлы", callback_data="files_clear")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
     ]
@@ -1652,6 +1680,83 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
         await target_message.reply_document(excel_bytes, filename=f"итого_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
         return
 
+    if block_id == 'taxi':
+        # Получаем содержимое файла из базы данных
+        with db.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT file_content FROM uploaded_files WHERE id = %s", (file_id,))
+                result = cur.fetchone()
+                if not result or not result[0]:
+                    await target_message.reply_text("📭 Нет данных по такси для этой даты.")
+                    return
+                file_content = result[0]
+        
+        # Извлекаем данные по такси через парсер
+        logger.info(f"=== Extracting taxi expenses for file_id={file_id}, date={report_date} ===")
+        taxi_data = excel_processor.extract_taxi_expenses(file_content)
+        logger.info(f"Taxi data extracted: {taxi_data}")
+        
+        taxi_amount = taxi_data.get('taxi_amount', Decimal('0.00'))
+        taxi_percent_amount = taxi_data.get('taxi_percent_amount', Decimal('0.00'))
+        deposits = taxi_data.get('deposits', [])
+        deposits_total = taxi_data.get('deposits_total', Decimal('0.00'))
+        
+        logger.info(f"Parsed values: taxi={taxi_amount}, taxi_percent={taxi_percent_amount}, deposits={deposits_total}")
+        
+        # Общая сумма
+        total_amount = taxi_amount + taxi_percent_amount + deposits_total
+        
+        # Сохраняем в БД
+        db.save_taxi_expenses(file_id, taxi_amount, taxi_percent_amount, deposits_total, total_amount)
+        
+        # Показываем предпросмотр
+        lines = [f"🚕 ТАКСИ ({format_report_date(report_date)}) - {club_label}:"]
+        lines.append("")
+        lines.append(f"%такси(стов): {decimal_to_str(taxi_percent_amount)}")
+        lines.append(f"Такси: {decimal_to_str(taxi_amount)}")
+        lines.append(f"Депозиты: {decimal_to_str(deposits_total)}")
+        
+        if deposits:
+            for deposit in deposits:
+                lines.append(f"  • {decimal_to_str(deposit['amount'])} | {deposit['item']}")
+        
+        lines.append(f"  Итого депозитов: {decimal_to_str(deposits_total)}")
+        lines.append("")
+        lines.append(f"Итого всего: {decimal_to_str(total_amount)}")
+        
+        await target_message.reply_text("\n".join(lines))
+        
+        # Формируем Excel файл
+        display_rows = []
+        display_rows.append({
+            'Статья': '%такси(стов)',
+            'Сумма': decimal_to_float(taxi_percent_amount)
+        })
+        display_rows.append({
+            'Статья': 'Такси',
+            'Сумма': decimal_to_float(taxi_amount)
+        })
+        display_rows.append({
+            'Статья': 'Депозиты',
+            'Сумма': decimal_to_float(deposits_total)
+        })
+        
+        # Добавляем детализацию депозитов
+        for deposit in deposits:
+            display_rows.append({
+                'Статья': deposit['item'],
+                'Сумма': decimal_to_float(deposit['amount'])
+            })
+        
+        display_rows.append({
+            'Статья': 'ИТОГО',
+            'Сумма': decimal_to_float(total_amount)
+        })
+        
+        excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"ТАКСИ - {club_label}", club_label)
+        await target_message.reply_document(excel_bytes, filename=f"такси_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
+        return
+
     await target_message.reply_text("⚠️ Неизвестный блок.")
 
 
@@ -1898,6 +2003,204 @@ async def show_excel_structure(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ Ошибка: {str(e)}")
 
 
+async def reprocess_all_files(query, context: ContextTypes.DEFAULT_TYPE):
+    """Переобработать все загруженные файлы пользователя с новыми парсерами"""
+    if not user_is_authorized(query.from_user.id, context):
+        await request_password(query.message, context)
+        return
+    
+    try:
+        user_id = query.from_user.id
+        
+        # Получаем все файлы пользователя
+        with db.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, file_name, row_count, report_date, club_name
+                    FROM uploaded_files
+                    WHERE user_id = %s
+                    ORDER BY upload_date DESC
+                    """,
+                    (user_id,)
+                )
+                files = cur.fetchall()
+        
+        if not files:
+            await query.answer("📭 У вас нет загруженных файлов")
+            return
+        
+        processing_msg = await query.message.reply_text(f"🔄 Переобработка {len(files)} файлов...")
+        
+        processed_count = 0
+        errors_count = 0
+        
+        for file_info in files:
+            file_id = file_info['id']
+            file_name = file_info['file_name']
+            
+            try:
+                # Читаем содержимое файла из базы
+                with db.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT file_content FROM uploaded_files WHERE id = %s", (file_id,))
+                        result = cur.fetchone()
+                        if not result or not result[0]:
+                            logger.warning(f"File {file_id} has no content, skipping")
+                            errors_count += 1
+                            continue
+                        file_content = result[0]
+                
+                logger.info(f"Reprocessing file_id={file_id}, file_name={file_name}")
+                
+                # Переобрабатываем все блоки (как при загрузке файла)
+                file_content_bytes = bytes(file_content)
+                
+                # Доходы
+                income_records = excel_processor.extract_income_records(file_content_bytes)
+                if income_records:
+                    db.save_income_records(file_id, income_records)
+                
+                # Входные билеты
+                ticket_sales_data = excel_processor.extract_ticket_sales(file_content_bytes)
+                if ticket_sales_data.get('records'):
+                    db.save_ticket_sales(file_id, ticket_sales_data['records'])
+                
+                # Типы оплат
+                payment_types_data = excel_processor.extract_payment_types(file_content_bytes)
+                if payment_types_data.get('records'):
+                    db.save_payment_types(file_id, payment_types_data['records'])
+                
+                # Статистика персонала
+                staff_stats = excel_processor.extract_staff_statistics(file_content_bytes)
+                if staff_stats:
+                    db.save_staff_statistics(file_id, staff_stats)
+                
+                # Расходы
+                expense_data = excel_processor.extract_expense_records(file_content_bytes)
+                if expense_data.get('records'):
+                    db.save_expense_records(file_id, expense_data['records'])
+                
+                # Долги по персоналу
+                staff_debts_data = excel_processor.extract_staff_debts(file_content_bytes)
+                if staff_debts_data.get('records'):
+                    db.save_staff_debts(file_id, staff_debts_data['records'])
+                
+                # Инкассация
+                cash_collection_data = excel_processor.extract_cash_collection(file_content_bytes)
+                if cash_collection_data.get('records'):
+                    db.save_cash_collection(file_id, cash_collection_data['records'])
+                
+                # Примечания
+                notes_data = excel_processor.extract_notes_entries(file_content_bytes)
+                if notes_data:
+                    notes_records = []
+                    for entry in notes_data.get('безнал', []):
+                        notes_records.append({
+                            'category': entry.get('category', 'безнал'),
+                            'entry_text': entry.get('entry_text', ''),
+                            'is_total': entry.get('is_total', False),
+                            'amount': entry.get('amount')
+                        })
+                    for entry in notes_data.get('нал', []):
+                        notes_records.append({
+                            'category': entry.get('category', 'нал'),
+                            'entry_text': entry.get('entry_text', ''),
+                            'is_total': entry.get('is_total', False),
+                            'amount': entry.get('amount')
+                        })
+                    for text in notes_data.get('extra', []):
+                        notes_records.append({
+                            'category': 'прочее',
+                            'entry_text': text,
+                            'is_total': False,
+                            'amount': None
+                        })
+                    if notes_records:
+                        db.save_notes_entries(file_id, notes_records)
+                
+                # Итого
+                totals_summary = excel_processor.extract_totals_summary(file_content_bytes)
+                if totals_summary:
+                    db.save_totals_summary(file_id, totals_summary)
+                
+                # ТАКСИ (новый парсер)
+                taxi_data = excel_processor.extract_taxi_expenses(file_content_bytes)
+                taxi_amount = taxi_data.get('taxi_amount', Decimal('0.00'))
+                taxi_percent_amount = taxi_data.get('taxi_percent_amount', Decimal('0.00'))
+                deposits_total = taxi_data.get('deposits_total', Decimal('0.00'))
+                total_amount = taxi_amount + taxi_percent_amount + deposits_total
+                db.save_taxi_expenses(file_id, taxi_amount, taxi_percent_amount, deposits_total, total_amount)
+                
+                # Прочие расходы
+                misc_expenses_text = excel_processor.extract_misc_expenses_from_notes_after_total(file_content_bytes)
+                if misc_expenses_text:
+                    parsed_expenses = []
+                    for line in misc_expenses_text.split('\n'):
+                        line = line.strip()
+                        if not line or line.lower().startswith('итого'):
+                            continue
+                        
+                        number_pattern = r'\d+(?:[.,]\d+)*'
+                        number_positions = []
+                        for match in re.finditer(number_pattern, line):
+                            start_pos = match.start()
+                            end_pos = match.end()
+                            number_str = match.group(0)
+                            number_positions.append((start_pos, end_pos, number_str))
+                        
+                        for i, (start_pos, end_pos, number_str) in enumerate(number_positions):
+                            after_number = line[end_pos:].lstrip()
+                            if not after_number.startswith('-'):
+                                continue
+                            
+                            dash_pos = end_pos + len(line[end_pos:]) - len(after_number)
+                            expense_end = len(line)
+                            
+                            for j in range(i + 1, len(number_positions)):
+                                next_start, next_end, next_number = number_positions[j]
+                                after_next = line[next_end:].lstrip()
+                                if after_next.startswith('-'):
+                                    expense_end = next_start
+                                    break
+                            
+                            expense_item = line[dash_pos + 1:expense_end].strip()
+                            amount_clean = number_str.replace('.', '').replace(',', '').replace(' ', '')
+                            
+                            try:
+                                amount = Decimal(amount_clean)
+                                parsed_expenses.append({
+                                    'expense_item': expense_item,
+                                    'amount': amount,
+                                    'is_total': False
+                                })
+                            except (ValueError, InvalidOperation):
+                                continue
+                    
+                    if parsed_expenses:
+                        db.save_misc_expenses_records(file_id, parsed_expenses)
+                
+                processed_count += 1
+                logger.info(f"File {file_id} ({file_name}) reprocessed successfully")
+                
+            except Exception as e:
+                logger.error(f"Error reprocessing file {file_id} ({file_name}): {e}", exc_info=True)
+                errors_count += 1
+        
+        result_msg = f"✅ Переобработка завершена!\n\n"
+        result_msg += f"📊 Обработано файлов: {processed_count}\n"
+        if errors_count > 0:
+            result_msg += f"❌ Ошибок: {errors_count}\n"
+        result_msg += f"\nВсе данные обновлены, включая ТАКСИ."
+        
+        await processing_msg.edit_text(result_msg)
+        await query.answer("✅ Готово!")
+        
+    except Exception as e:
+        logger.error(f"Error in reprocess_all_files: {e}", exc_info=True)
+        await query.answer("❌ Ошибка при переобработке")
+        await query.message.reply_text(f"❌ Ошибка: {str(e)}")
+
 async def reprocess_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Переобработать последний загруженный файл с новым парсером"""
     if not user_is_authorized(update.effective_user.id, context):
@@ -2116,6 +2419,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_lines.append(f"Финансовый результат (Итого доходы - Расходы): {format(balance, '0.0f')}")
 
             summary_lines.append("\n".join(msg_lines))
+
+        # Парсим и сохраняем данные по такси при загрузке файла
+        logger.info(f"=== Parsing taxi expenses on file upload for file_id={file_id} ===")
+        taxi_data = excel_processor.extract_taxi_expenses(bytes(file_content))
+        logger.info(f"Taxi data extracted: {taxi_data}")
+        
+        taxi_amount = taxi_data.get('taxi_amount', Decimal('0.00'))
+        taxi_percent_amount = taxi_data.get('taxi_percent_amount', Decimal('0.00'))
+        deposits_total = taxi_data.get('deposits_total', Decimal('0.00'))
+        total_amount = taxi_amount + taxi_percent_amount + deposits_total
+        
+        # Сохраняем данные по такси в БД
+        db.save_taxi_expenses(file_id, taxi_amount, taxi_percent_amount, deposits_total, total_amount)
+        logger.info(f"Taxi expenses saved: taxi={taxi_amount}, taxi_percent={taxi_percent_amount}, deposits={deposits_total}, total={total_amount}")
 
         staff_debts_data = excel_processor.extract_staff_debts(bytes(file_content))
         if staff_debts_data.get('records'):
@@ -2698,6 +3015,45 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
                     caption=f"📊 Сводный отчет: Итоговый баланс\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
                 )
             
+            elif block_id == 'taxi':
+                processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по такси...")
+                
+                # Получаем данные за период из БД
+                period_data = db.get_taxi_expenses_period(club_name, start_date, end_date)
+                
+                taxi_amount = Decimal(str(period_data.get('total_taxi_amount', 0)))
+                taxi_percent_amount = Decimal(str(period_data.get('total_taxi_percent_amount', 0)))
+                deposits_total = Decimal(str(period_data.get('total_deposits_total', 0)))
+                total_amount = Decimal(str(period_data.get('total_amount', 0)))
+                
+                # Формируем предпросмотр
+                lines = [f"🚕 ТАКСИ за период {format_report_date(start_date)} - {format_report_date(end_date)} ({club_name}):\n"]
+                lines.append(f"%такси(стов): {decimal_to_str(taxi_percent_amount)}")
+                lines.append(f"Такси: {decimal_to_str(taxi_amount)}")
+                lines.append(f"Депозиты: {decimal_to_str(deposits_total)}")
+                lines.append(f"\nИтого всего: {decimal_to_str(total_amount)}")
+                
+                await processing_msg.edit_text("\n".join(lines))
+                
+                # Формируем Excel файл
+                report_data = [
+                    {'Статья': '%такси(стов)', 'Сумма': decimal_to_float(taxi_percent_amount)},
+                    {'Статья': 'Такси', 'Сумма': decimal_to_float(taxi_amount)},
+                    {'Статья': 'Депозиты', 'Сумма': decimal_to_float(deposits_total)},
+                    {'Статья': 'ИТОГО', 'Сумма': decimal_to_float(total_amount)}
+                ]
+                
+                excel_bytes = excel_processor.export_period_report_to_excel(
+                    report_data, club_name, start_date, end_date, "ТАКСИ"
+                )
+                
+                filename = f"такси_{club_name}_{start_date.strftime('%d.%m')}-{end_date.strftime('%d.%m')}.xlsx"
+                await update.message.reply_document(
+                    excel_bytes,
+                    filename=filename,
+                    caption=f"📊 Сводный отчет: ТАКСИ\n📅 Период: {format_report_date(start_date)} - {format_report_date(end_date)}\n🏢 Клуб: {club_name}"
+                )
+            
             else:  # income (по умолчанию)
                 processing_msg = await update.message.reply_text("⏳ Формирую сводный отчет по доходам...")
                 
@@ -2966,6 +3322,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             reply_markup=get_files_keyboard()
         )
 
+    elif data == "files_reprocess_all":
+        await query.answer("⏳ Начинаю переобработку всех файлов...")
+        await reprocess_all_files(query, context)
+    
     elif data == "files_clear":
         confirmation_keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Удалить все", callback_data="files_clear_confirm")],
@@ -3006,6 +3366,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🏦 Инкассация", callback_data="report_block|cash")],
             [InlineKeyboardButton("📌 Долги по персоналу", callback_data="report_block|debts")],
             [InlineKeyboardButton("📊 Итоговый баланс", callback_data="report_block|totals")],
+            [InlineKeyboardButton("🚕 ТАКСИ", callback_data="report_block|taxi")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="main_menu")]
         ])
         await query.message.reply_text(
@@ -3034,7 +3395,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             'staff': 'Статистика персонала',
             'expenses': 'Расходы',
             'cash': 'Инкассация',
-            'debts': 'Долги по персоналу'
+            'debts': 'Долги по персоналу',
+            'taxi': 'ТАКСИ'
         }
         block_name = block_names.get(block_id, block_id)
         

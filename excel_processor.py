@@ -8,8 +8,10 @@ from decimal import Decimal, InvalidOperation
 import io
 import re
 
-logging.basicConfig(level=logging.INFO)
+# Логирование настроено в bot.py, здесь только получаем logger
+import logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class ExcelProcessor:
@@ -808,7 +810,7 @@ class ExcelProcessor:
                     if is_expenses_block:
                         expense_col = col_idx
                         start_row = row_idx + 1
-                        logger.info(f"Found 'Расходы' at row {row_idx}, col {col_idx}")
+                        logger.info(f"✅ Found 'Расходы' block at row {row_idx}, col {col_idx}, cell='{cell}'")
                         break
             if expense_col is not None:
                 break
@@ -836,6 +838,8 @@ class ExcelProcessor:
             item_name = str(item_cell).strip()
             if not item_name:
                 break
+            
+            logger.info(f"Processing expense row {row_idx}: item='{item_name}'")
 
             # Ищем сумму справа (пропускаем пустые ячейки)
             amount = None
@@ -879,6 +883,7 @@ class ExcelProcessor:
                 'amount': amount,
                 'is_total': False
             })
+            logger.info(f"Added expense record: '{item_name}' = {amount}")
 
         if not records:
             return {}
@@ -1561,6 +1566,113 @@ class ExcelProcessor:
             })
 
         return records
+
+    def extract_taxi_expenses(self, file_content: bytes) -> Dict[str, Any]:
+        """Извлечение данных по такси из файла"""
+        logger.info("=== Starting taxi expenses extraction ===")
+        result = {
+            'taxi_amount': Decimal('0.00'),
+            'taxi_percent_amount': Decimal('0.00'),
+            'deposits': [],
+            'deposits_total': Decimal('0.00')
+        }
+        
+        try:
+            # 1. Получаем прочие расходы и ищем депозиты
+            logger.info("Step 1: Extracting misc expenses for deposits...")
+            misc_expenses_text = self.extract_misc_expenses_from_notes_after_total(file_content)
+            if misc_expenses_text:
+                # Парсим прочие расходы
+                deposits = []
+                for line in misc_expenses_text.split('\n'):
+                    line = line.strip()
+                    if not line or line.lower().startswith('итого'):
+                        continue
+                    
+                    # Находим все числа с дефисом после них
+                    number_pattern = r'\d+(?:[.,]\d+)*'
+                    number_positions = []
+                    
+                    for match in re.finditer(number_pattern, line):
+                        start_pos = match.start()
+                        end_pos = match.end()
+                        number_str = match.group(0)
+                        number_positions.append((start_pos, end_pos, number_str))
+                    
+                    # Обрабатываем каждое число
+                    for i, (start_pos, end_pos, number_str) in enumerate(number_positions):
+                        after_number = line[end_pos:].lstrip()
+                        if not after_number.startswith('-'):
+                            continue
+                        
+                        dash_pos = end_pos + len(line[end_pos:]) - len(after_number)
+                        expense_end = len(line)
+                        
+                        # Ищем следующее число с дефисом
+                        for j in range(i + 1, len(number_positions)):
+                            next_start, next_end, next_number = number_positions[j]
+                            after_next = line[next_end:].lstrip()
+                            if after_next.startswith('-'):
+                                expense_end = next_start
+                                break
+                        
+                        expense_item = line[dash_pos + 1:expense_end].strip()
+                        
+                        # Проверяем, содержит ли статья слово "депозит"
+                        if 'депозит' in expense_item.lower():
+                            amount_clean = number_str.replace('.', '').replace(',', '').replace(' ', '')
+                            try:
+                                amount = Decimal(amount_clean)
+                                deposits.append({
+                                    'amount': amount,
+                                    'item': expense_item
+                                })
+                                result['deposits_total'] += amount
+                            except (ValueError, InvalidOperation):
+                                continue
+                
+                result['deposits'] = deposits
+            
+            # 2. Получаем блок расходов и ищем "ТАКСИ" и "% ТАКСИСТОВ"
+            logger.info("Step 2: Extracting expense records to find TAXI and % TAXI...")
+            expense_data = self.extract_expense_records(file_content)
+            logger.info(f"extract_expense_records returned: {expense_data}")
+            
+            if expense_data and expense_data.get('records'):
+                logger.info(f"Found {len(expense_data['records'])} expense records")
+                for record in expense_data['records']:
+                    if record.get('is_total'):
+                        continue
+                    
+                    item_name = str(record.get('expense_item', '')).strip()
+                    item_name_lower = item_name.lower()
+                    amount = record.get('amount', Decimal('0.00'))
+                    
+                    logger.info(f"Checking expense item: '{item_name}' (lower: '{item_name_lower}') with amount {amount}")
+                    
+                    # Ищем "% таксистов" или "% таксистам" (приоритет - сначала процент)
+                    # Проверяем: содержит "%" И содержит "таксист"
+                    if '%' in item_name_lower and 'таксист' in item_name_lower:
+                        logger.info(f"✅ MATCH: '% таксистов/таксистам' found in '{item_name}' - adding {amount}")
+                        result['taxi_percent_amount'] += amount
+                    # Ищем просто "такси" (но не "% таксистов")
+                    elif 'такси' in item_name_lower and 'таксист' not in item_name_lower:
+                        logger.info(f"✅ MATCH: 'Такси' found in '{item_name}' - adding {amount}")
+                        result['taxi_amount'] += amount
+            else:
+                logger.warning(f"No expense records found or expense_data is empty")
+                logger.warning(f"expense_data = {expense_data}")
+            
+        except Exception as e:
+            logger.error(f"Error extracting taxi expenses: {e}", exc_info=True)
+        
+        logger.info(f"=== Taxi expenses extraction result ===")
+        logger.info(f"taxi_amount: {result['taxi_amount']}")
+        logger.info(f"taxi_percent_amount: {result['taxi_percent_amount']}")
+        logger.info(f"deposits_total: {result['deposits_total']}")
+        logger.info(f"total (calculated): {result['taxi_amount'] + result['taxi_percent_amount'] + result['deposits_total']}")
+        
+        return result
 
     def export_off_shift_expenses_to_excel(self, expenses: List[Dict[str, Any]], club_name: str, start_date, end_date) -> bytes:
         """Экспорт расходов вне смены в Excel"""
