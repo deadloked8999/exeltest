@@ -785,20 +785,34 @@ class ExcelProcessor:
         if df.empty:
             return {}
 
-        # Ищем заголовок "Расходы" в любой колонке
+        # Ищем заголовок "Расходы" в любой колонке (НО НЕ "Прочие расходы")
+        # "Расходы" - это отдельный блок в верхней правой части таблицы
+        # "Прочие расходы" - это секция внутри блока "Примечание"
         expense_col = None
         start_row = None
         for row_idx in range(len(df)):
             for col_idx in range(df.shape[1]):
                 cell = df.iloc[row_idx, col_idx]
-                if isinstance(cell, str) and 'расход' in cell.strip().lower():
-                    expense_col = col_idx
-                    start_row = row_idx + 1
-                    logger.info(f"Found 'Расходы' at row {row_idx}, col {col_idx}")
-                    break
+                if isinstance(cell, str):
+                    cell_lower = cell.strip().lower()
+                    # Ищем именно "Расходы" как отдельное слово, НЕ "Прочие расходы"
+                    # Проверяем: слово "расходы" есть, но НЕ "прочие расходы"
+                    is_expenses_block = False
+                    
+                    if cell_lower == 'расходы':
+                        is_expenses_block = True
+                    elif cell_lower.startswith('расходы'):
+                        if 'прочие расходы' not in cell_lower and not cell_lower.startswith('прочие'):
+                            is_expenses_block = True
+                    
+                    if is_expenses_block:
+                        expense_col = col_idx
+                        start_row = row_idx + 1
+                        logger.info(f"Found 'Расходы' at row {row_idx}, col {col_idx}")
+                        break
             if expense_col is not None:
                 break
-
+        
         if expense_col is None:
             logger.info("Expense block header not found")
             return {}

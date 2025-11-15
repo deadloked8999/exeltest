@@ -98,6 +98,18 @@ CREATE TABLE IF NOT EXISTS expense_records (
 
 CREATE INDEX IF NOT EXISTS idx_expense_records_file_id ON expense_records(file_id);
 
+-- Таблица для блока «Прочие расходы»
+CREATE TABLE IF NOT EXISTS misc_expenses_records (
+    id SERIAL PRIMARY KEY,
+    file_id INTEGER REFERENCES uploaded_files(id) ON DELETE CASCADE,
+    expense_item VARCHAR(255) NOT NULL,
+    amount NUMERIC(14,2) NOT NULL,
+    is_total BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_misc_expenses_records_file_id ON misc_expenses_records(file_id);
+
 -- Таблица для блока «Инкассация»
 CREATE TABLE IF NOT EXISTS cash_collection (
     id SERIAL PRIMARY KEY,

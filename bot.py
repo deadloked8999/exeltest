@@ -29,7 +29,7 @@ from simple_query_parser import SimpleQueryParser
 from psycopg2.extras import RealDictCursor
 import re
 import io
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, date
 import pandas as pd
 
@@ -1488,24 +1488,112 @@ async def send_report_block_data(target_message, report_date: date, block_id: st
             await target_message.reply_text("📭 Нет прочих расходов для этой даты.")
             return
         
+        # Парсим прочие расходы: формат "сумма-статья расхода"
+        # В одной строке может быть несколько записей: "1000- т. анар и сразу дальше 2000-т. бобр"
+        # Примеры: "8.000-депозит т.Анар", "12.000-депозит т.Фарид", "250-доставка (62)"
+        parsed_expenses = []
+        total_amount = Decimal('0.00')
+        
+        # Парсим прочие расходы: в одной строке может быть несколько записей
+        # Формат: "сумма-статья", примеры: "1000- т. анар и сразу дальше 2000-т. бобр"
+        for line in misc_expenses_text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Пропускаем строки с ИТОГО
+            if line.lower().startswith('итого'):
+                continue
+            
+            # Находим все числа в строке (с учетом точек/запятых как разделителей тысяч)
+            # Паттерн для поиска чисел: \d+(?:[.,]\d+)*
+            number_pattern = r'\d+(?:[.,]\d+)*'
+            number_positions = []
+            
+            for match in re.finditer(number_pattern, line):
+                start_pos = match.start()
+                end_pos = match.end()
+                number_str = match.group(0)
+                number_positions.append((start_pos, end_pos, number_str))
+            
+            # Обрабатываем каждое найденное число
+            for i, (start_pos, end_pos, number_str) in enumerate(number_positions):
+                # Проверяем, есть ли дефис сразу после числа (с возможными пробелами)
+                after_number = line[end_pos:].lstrip()
+                
+                if not after_number.startswith('-'):
+                    # Если после числа нет дефиса, пропускаем это число
+                    continue
+                
+                # Находим позицию дефиса
+                dash_pos = end_pos + len(line[end_pos:]) - len(after_number)
+                after_dash = line[dash_pos + 1:].lstrip()
+                
+                # Определяем конец статьи расхода:
+                # - До следующего числа с дефисом после него
+                # - Или до конца строки
+                expense_end = len(line)
+                
+                # Ищем следующее число с дефисом
+                for j in range(i + 1, len(number_positions)):
+                    next_start, next_end, next_number = number_positions[j]
+                    # Проверяем, есть ли дефис после следующего числа
+                    after_next = line[next_end:].lstrip()
+                    if after_next.startswith('-'):
+                        # Нашли следующее число с дефисом - статья заканчивается перед ним
+                        expense_end = next_start
+                        break
+                
+                # Извлекаем статью расхода
+                expense_item = line[dash_pos + 1:expense_end].strip()
+                
+                # Убираем точки и запятые из суммы
+                amount_clean = number_str.replace('.', '').replace(',', '').replace(' ', '')
+                
+                try:
+                    amount = Decimal(amount_clean)
+                    
+                    parsed_expenses.append({
+                        'expense_item': expense_item,
+                        'amount': amount,
+                        'is_total': False
+                    })
+                    
+                    total_amount += amount
+                    
+                except (ValueError, InvalidOperation) as e:
+                    logger.warning(f"Failed to parse amount from '{number_str}': {e}")
+                    continue
+        
+        if not parsed_expenses:
+            await target_message.reply_text("📭 Не удалось распарсить прочие расходы.")
+            return
+        
+        # Сохраняем в БД в отдельную таблицу для прочих расходов
+        db.save_misc_expenses_records(file_id, parsed_expenses)
+        
         # Показываем предпросмотр
         lines = [f"💸 Прочие расходы ({format_report_date(report_date)}) - {club_label}:"]
         lines.append("")
-        # Добавляем текст прочих расходов, разбивая по строкам для лучшей читаемости
-        for line in misc_expenses_text.split('\n'):
-            if line.strip():
-                lines.append(f"• {line.strip()}")
+        for exp in parsed_expenses:
+            lines.append(f"• {decimal_to_str(exp['amount'])} | {exp['expense_item']}")
+        lines.append(f"\n💰 Итого: {decimal_to_str(total_amount)}")
         
         await target_message.reply_text("\n".join(lines))
         
-        # Формируем Excel файл
-        # Каждая строка текста = одна строка в Excel
+        # Формируем Excel файл с двумя колонками
         display_rows = []
-        for line in misc_expenses_text.split('\n'):
-            if line.strip():
-                display_rows.append({
-                    'Прочие расходы': line.strip()
-                })
+        for exp in parsed_expenses:
+            display_rows.append({
+                'Сумма': decimal_to_float(exp['amount']),
+                'Статья расхода': exp['expense_item']
+            })
+        
+        # Добавляем итоговую строку
+        display_rows.append({
+            'Сумма': decimal_to_float(total_amount),
+            'Статья расхода': 'ИТОГО'
+        })
         
         excel_bytes = excel_processor.export_to_excel_with_header(display_rows, report_date, f"Прочие расходы - {club_label}", club_label)
         await target_message.reply_document(excel_bytes, filename=f"прочие_расходы_{club_label}_{format_report_date(report_date)}.xlsx", caption=f"📅 Дата: {format_report_date(report_date)} | Клуб: {club_label}")
@@ -2028,81 +2116,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg_lines.append(f"Финансовый результат (Итого доходы - Расходы): {format(balance, '0.0f')}")
 
             summary_lines.append("\n".join(msg_lines))
-        
-        # НОВАЯ ЛОГИКА: Обработка прочих расходов из примечаний с помощью DeepSeek
-        misc_expenses_text = excel_processor.extract_misc_expenses_text_from_notes(bytes(file_content))
-        if misc_expenses_text:
-            logger.info(f"Found misc expenses text in notes: {misc_expenses_text[:200]}")
-            
-            # Парсим через DeepSeek API
-            from deepseek_api import DeepSeekAPI
-            import os
-            
-            # Используем API ключ из переменной окружения или дефолтный
-            deepseek_api_key = 'sk-7c638331eef3495d9ae00f39efba407d'
-            deepseek = DeepSeekAPI(api_key=deepseek_api_key)
-            
-            parse_result = deepseek.parse_misc_expenses_from_notes(misc_expenses_text)
-            
-            if parse_result['success']:
-                parsed_expenses = parse_result['expenses']
-                parsed_total = parse_result['total']
-                
-                # Получаем сумму "Прочие расходы" из блока ДОХОДЫ
-                income_misc_expense = None
-                if income_records:
-                    income_misc_expense = next(
-                        (record['amount'] for record in income_records 
-                         if 'прочие расходы' in record['category'].strip().lower()),
-                        None
-                    )
-                
-                # Сравниваем суммы
-                amounts_match = False
-                if income_misc_expense is not None:
-                    amounts_match = abs(parsed_total - income_misc_expense) < Decimal('0.01')
-                
-                # Сохраняем информацию для подтверждения пользователем
-                context.user_data['pending_misc_expenses'] = {
-                    'file_id': file_id,
-                    'expenses': parsed_expenses,
-                    'parsed_total': parsed_total,
-                    'income_misc_expense': income_misc_expense,
-                    'amounts_match': amounts_match
-                }
-                
-                # Формируем сообщение для пользователя
-                if amounts_match:
-                    msg = "✅ Прочие расходы распознаны DeepSeek и суммы совпадают!\n\n"
-                else:
-                    msg = "⚠️ Прочие расходы распознаны, но суммы НЕ совпадают!\n\n"
-                
-                msg += "📋 Распознанные расходы:\n"
-                for exp in parsed_expenses:
-                    msg += f"• {exp['item']}: {decimal_to_str(exp['amount'])}\n"
-                
-                msg += f"\n💰 Итого (DeepSeek): {decimal_to_str(parsed_total)}\n"
-                
-                if income_misc_expense is not None:
-                    msg += f"💰 Итого (из блока Доходы): {decimal_to_str(income_misc_expense)}\n"
-                
-                if amounts_match:
-                    msg += "\n✅ Суммы совпадают!"
-                else:
-                    msg += "\n⚠️ Суммы НЕ совпадают! Проверьте данные."
-                
-                msg += "\n\nПодтвердить и сохранить эти расходы?"
-                
-                keyboard = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_misc_expenses")],
-                    [InlineKeyboardButton("✏️ Редактировать", callback_data="edit_misc_expenses")],
-                    [InlineKeyboardButton("❌ Отменить", callback_data="cancel_misc_expenses")]
-                ])
-                
-                await update.message.reply_text(msg, reply_markup=keyboard)
-            else:
-                logger.warning(f"Failed to parse misc expenses: {parse_result.get('error')}")
-                summary_lines.append(f"⚠️ Не удалось распознать прочие расходы: {parse_result.get('error')}")
 
         staff_debts_data = excel_processor.extract_staff_debts(bytes(file_content))
         if staff_debts_data.get('records'):
@@ -3221,60 +3234,21 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
     
     elif data == "confirm_misc_expenses":
-        # Подтверждение прочих расходов
-        pending = context.user_data.get('pending_misc_expenses')
-        if not pending:
-            await query.answer("❌ Данные не найдены")
-            return
-        
-        file_id = pending['file_id']
-        expenses = pending['expenses']
-        
-        # Сохраняем каждый расход в expense_records
-        for exp in expenses:
-            db.save_expense_records(file_id, [{
-                'expense_item': exp['item'],
-                'amount': exp['amount']
-            }])
-        
-        context.user_data.pop('pending_misc_expenses', None)
-        
-        await query.answer("✅ Сохранено!")
-        await query.message.reply_text(
-            f"✅ Прочие расходы сохранены!\n\n"
-            f"Добавлено расходов: {len(expenses)}\n"
-            f"💰 Итого: {decimal_to_str(pending['parsed_total'])}"
-        )
+        # Подтверждение прочих расходов (старый код - больше не используется)
+        # Прочие расходы теперь парсятся автоматически при просмотре
+        await query.answer("ℹ️ Этот функционал больше не используется")
+        return
     
     elif data == "edit_misc_expenses":
-        # Редактирование прочих расходов
-        pending = context.user_data.get('pending_misc_expenses')
-        if not pending:
-            await query.answer("❌ Данные не найдены")
-            return
-        
-        context.user_data['editing_misc_expenses'] = True
-        
-        expenses = pending['expenses']
-        msg = "✏️ Редактирование прочих расходов\n\n"
-        msg += "Текущие расходы:\n"
-        for i, exp in enumerate(expenses, 1):
-            msg += f"{i}. {exp['item']}: {decimal_to_str(exp['amount'])}\n"
-        
-        msg += "\n📝 Отправьте все расходы заново в формате:\n"
-        msg += "статья расхода 1000\n"
-        msg += "другая статья 2000\n"
-        msg += "...\n\n"
-        msg += "Каждая строка - одна статья расхода и сумма."
-        
-        await query.answer("✏️ Редактирование")
-        await query.message.reply_text(msg)
+        # Редактирование прочих расходов (старый код - больше не используется)
+        await query.answer("ℹ️ Этот функционал больше не используется")
+        return
     
     elif data == "cancel_misc_expenses":
-        # Отмена прочих расходов
+        # Отмена прочих расходов (старый код - больше не используется)
         context.user_data.pop('pending_misc_expenses', None)
-        await query.answer("❌ Отменено")
-        await query.message.reply_text("❌ Прочие расходы не сохранены.")
+        await query.answer("ℹ️ Этот функционал больше не используется")
+        return
 
     elif data == "view_off_shift_expenses":
         keyboard = InlineKeyboardMarkup([

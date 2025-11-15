@@ -384,6 +384,49 @@ class Database:
                 )
                 return [dict(row) for row in cur.fetchall()]
 
+    def save_misc_expenses_records(self, file_id: int, records: List[Dict[str, Any]]) -> None:
+        """Сохранение данных блока «Прочие расходы»"""
+        if not records:
+            return
+
+        with self.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM misc_expenses_records WHERE file_id = %s",
+                    (file_id,)
+                )
+
+                cur.executemany(
+                    """
+                    INSERT INTO misc_expenses_records (file_id, expense_item, amount, is_total)
+                    VALUES (%s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            file_id,
+                            rec.get('expense_item'),
+                            rec.get('amount'),
+                            rec.get('is_total', False)
+                        )
+                        for rec in records
+                    ]
+                )
+
+    def list_misc_expenses_records(self, file_id: int) -> List[Dict[str, Any]]:
+        """Получение данных блока «Прочие расходы» по файлу"""
+        with self.get_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT expense_item, amount, is_total, created_at
+                    FROM misc_expenses_records
+                    WHERE file_id = %s
+                    ORDER BY id
+                    """,
+                    (file_id,)
+                )
+                return [dict(row) for row in cur.fetchall()]
+
     def save_cash_collection(self, file_id: int, records: List[Dict[str, Any]]) -> None:
         """Сохранение данных блока «Инкассация»"""
         if not records:
