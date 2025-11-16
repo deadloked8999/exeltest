@@ -1129,11 +1129,126 @@ async def generate_tickets_period_report(club_name: str, start_date: date, end_d
 
 async def generate_week_report(target_message, club_name: str, week_start: date, week_end: date):
     """Генерация отчета за неделю"""
-    # Заглушка - полная реализация будет в следующем шаге
-    await target_message.reply_text(
-        f"📅 Отчет за неделю для {club_name}\n"
-        f"Период: {format_report_date(week_start)} - {format_report_date(week_end)}\n\n"
-        f"⏳ Функция в разработке..."
+    from datetime import timedelta
+    
+    # Получаем все файлы за неделю
+    files = db.get_files_by_period(week_start, week_end, club_name)
+    
+    if not files:
+        await target_message.reply_text(
+            f"📭 Нет данных за период {format_report_date(week_start)} - {format_report_date(week_end)} для клуба {club_name}",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return
+    
+    # Проверяем, полная ли неделя (7 дней)
+    expected_days = 7
+    actual_dates = set(f['report_date'] for f in files if f.get('report_date'))
+    actual_days = len(actual_dates)
+    
+    is_full_week = actual_days == expected_days
+    week_warning = ""
+    if not is_full_week:
+        week_warning = f"\n⚠️ ВНИМАНИЕ: Неполная неделя! Данных за {actual_days} из {expected_days} дней.\n"
+    
+    # 1. Получаем итого доходов за неделю (категория "итого" или "итого за смену" из блока доходов)
+    income_total = Decimal('0.00')
+    staff_amount = Decimal('0.00')
+    staff_hookah_amount = Decimal('0.00')
+    
+    for file_info in files:
+        file_id = file_info['id']
+        records = db.list_income_records(file_id)
+        
+        for rec in records:
+            category_lower = rec['category'].strip().lower()
+            amount = rec['amount']
+            
+            # Ищем ИТОГО ЗА СМЕНУ (только эта категория, не "итого касса"!)
+            if category_lower == 'итого за смену':
+                income_total += amount
+            
+            # Ищем стафф
+            if 'стафф' in category_lower and 'кальян' not in category_lower:
+                staff_amount += amount
+            
+            # Ищем стафф кальян
+            if 'стафф' in category_lower and 'кальян' in category_lower:
+                staff_hookah_amount += amount
+    
+    # 2. Получаем количество гостей (билетов) за неделю
+    tickets_result = await generate_tickets_period_report(club_name, week_start, week_end)
+    if tickets_result:
+        _, guests_count, _ = tickets_result
+    else:
+        guests_count = 0
+    
+    # 3. Рассчитываем средний чек
+    # Средний чек = (Итого доходов - (стафф + стафф кальян)) / количество гостей
+    staff_total = staff_amount + staff_hookah_amount
+    net_income = income_total - staff_total
+    
+    if guests_count > 0:
+        average_check = net_income / Decimal(guests_count)
+    else:
+        average_check = Decimal('0.00')
+    
+    # 4. Формируем предпросмотр (только главные показатели)
+    lines = [
+        f"📅 Отчет за неделю ({club_name})",
+        f"Период: {format_report_date(week_start)} - {format_report_date(week_end)}",
+    ]
+    
+    # Добавляем предупреждение о неполной неделе, если есть
+    if week_warning:
+        lines.append(week_warning)
+    
+    lines.extend([
+        f"💰 Итого доходов: {decimal_to_str(income_total)}",
+        f"👥 Количество гостей: {guests_count}",
+        f"💵 Средний чек: {decimal_to_str(average_check)}"
+    ])
+    
+    await target_message.reply_text("\n".join(lines))
+    
+    # 5. Формируем Excel файл
+    display_rows = [
+        {
+            'Показатель': 'Итого доходов',
+            'Значение': decimal_to_float(income_total)
+        },
+        {
+            'Показатель': 'Количество гостей',
+            'Значение': guests_count
+        },
+        {
+            'Показатель': 'Средний чек',
+            'Значение': decimal_to_float(average_check)
+        },
+        {
+            'Показатель': 'Стафф',
+            'Значение': decimal_to_float(staff_amount)
+        },
+        {
+            'Показатель': 'Стафф кальян',
+            'Значение': decimal_to_float(staff_hookah_amount)
+        },
+        {
+            'Показатель': 'Чистый доход',
+            'Значение': decimal_to_float(net_income)
+        }
+    ]
+    
+    # Используем существующую функцию для экспорта периода
+    excel_bytes = excel_processor.export_period_report_to_excel(
+        display_rows, club_name, week_start, week_end, "Неделя"
+    )
+    
+    filename = f"неделя_{club_name}_{week_start.strftime('%d.%m')}-{week_end.strftime('%d.%m')}.xlsx"
+    await target_message.reply_document(
+        excel_bytes,
+        filename=filename,
+        caption=f"📊 Отчет за неделю: {format_report_date(week_start)} - {format_report_date(week_end)}\n🏢 Клуб: {club_name}"
     )
 
 
@@ -3473,12 +3588,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     elif data.startswith("week_club|"):
-        # Выбор клуба для отчета за неделю → формируем отчет
+        # Выбор клуба для отчета за неделю → показываем список доступных недель
         selected_club = data.split("|", 1)[1]
-        await query.answer(f"⏳ Формирую отчет за неделю для {selected_club}...")
         
-        # Определяем неделю (воскресенье-суббота)
-        # Находим последнюю неделю с данными
         from datetime import timedelta
         
         dates = db.get_report_dates(club_name=selected_club)
@@ -3489,14 +3601,51 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             )
             return
         
-        # Берем последнюю дату с данными
-        last_date = max(dates)
+        # Группируем даты по неделям (воскресенье-суббота)
+        weeks = []
+        for dt in dates:
+            # Определяем начало недели (воскресенье) для этой даты
+            days_from_sunday = (dt.weekday() + 1) % 7
+            week_start = dt - timedelta(days=days_from_sunday)
+            week_end = week_start + timedelta(days=6)
+            
+            # Проверяем, есть ли уже такая неделя
+            week_key = (week_start, week_end)
+            if week_key not in weeks:
+                weeks.append(week_key)
         
-        # Определяем начало недели (воскресенье) и конец (суббота) для этой даты
-        # weekday(): Monday=0, Sunday=6
-        days_from_sunday = (last_date.weekday() + 1) % 7
-        week_start = last_date - timedelta(days=days_from_sunday)  # Воскресенье
-        week_end = week_start + timedelta(days=6)  # Суббота
+        # Сортируем недели по дате начала (последняя первая)
+        weeks.sort(key=lambda x: x[0], reverse=True)
+        
+        if not weeks:
+            await query.message.reply_text(
+                f"📭 Нет данных для клуба {selected_club}",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Показываем список недель для выбора
+        keyboard = []
+        for week_start, week_end in weeks[:10]:  # Показываем последние 10 недель
+            label = f"{format_report_date(week_start)} - {format_report_date(week_end)}"
+            callback_data = f"week_select|{selected_club}|{week_start.isoformat()}|{week_end.isoformat()}"
+            keyboard.append([InlineKeyboardButton(label, callback_data=callback_data)])
+        
+        keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="week_report")])
+        
+        await query.message.reply_text(
+            f"📅 Выберите неделю для клуба {selected_club}:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data.startswith("week_select|"):
+        # Выбор конкретной недели → формируем отчет
+        parts = data.split("|")
+        selected_club = parts[1]
+        week_start = date.fromisoformat(parts[2])
+        week_end = date.fromisoformat(parts[3])
+        
+        await query.answer(f"⏳ Формирую отчет за неделю...")
         
         # Формируем отчет за неделю
         await generate_week_report(query.message, selected_club, week_start, week_end)
