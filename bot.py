@@ -134,7 +134,8 @@ def get_main_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("👥 Сотрудники", callback_data="employee_menu")],
         [InlineKeyboardButton("💸 Добавить расходы", callback_data="add_expense")],
         [InlineKeyboardButton("📋 Расходы вне смены", callback_data="view_off_shift_expenses")],
-        [InlineKeyboardButton("✏️ Редактировать расходы", callback_data="edit_off_shift_expenses")]
+        [InlineKeyboardButton("✏️ Редактировать расходы", callback_data="edit_off_shift_expenses")],
+        [InlineKeyboardButton("📅 Неделя", callback_data="week_report")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
