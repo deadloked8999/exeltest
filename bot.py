@@ -1127,6 +1127,16 @@ async def generate_tickets_period_report(club_name: str, start_date: date, end_d
     return display_rows, total_quantity, total_amount
 
 
+async def generate_week_report(target_message, club_name: str, week_start: date, week_end: date):
+    """Генерация отчета за неделю"""
+    # Заглушка - полная реализация будет в следующем шаге
+    await target_message.reply_text(
+        f"📅 Отчет за неделю для {club_name}\n"
+        f"Период: {format_report_date(week_start)} - {format_report_date(week_end)}\n\n"
+        f"⏳ Функция в разработке..."
+    )
+
+
 async def generate_income_period_report(club_name: str, start_date: date, end_date: date):
     """Генерация сводного отчета по доходам за период"""
     from collections import defaultdict
@@ -3448,6 +3458,48 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data == "main_queries":
         await send_queries_menu_message(query.message, context)
+
+    elif data == "week_report":
+        # Предлагаем выбрать клуб для отчета за неделю
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏢 Москвич", callback_data="week_club|Москвич")],
+            [InlineKeyboardButton("🌟 Анора", callback_data="week_club|Анора")],
+            [InlineKeyboardButton("⬅️ Главное меню", callback_data="main_menu")]
+        ])
+        await query.message.reply_text(
+            "📅 Отчет за неделю\n\n"
+            "Выберите клуб:",
+            reply_markup=keyboard
+        )
+
+    elif data.startswith("week_club|"):
+        # Выбор клуба для отчета за неделю → формируем отчет
+        selected_club = data.split("|", 1)[1]
+        await query.answer(f"⏳ Формирую отчет за неделю для {selected_club}...")
+        
+        # Определяем неделю (воскресенье-суббота)
+        # Находим последнюю неделю с данными
+        from datetime import timedelta
+        
+        dates = db.get_report_dates(club_name=selected_club)
+        if not dates:
+            await query.message.reply_text(
+                f"📭 Нет отчётов для клуба {selected_club}",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Берем последнюю дату с данными
+        last_date = max(dates)
+        
+        # Определяем начало недели (воскресенье) и конец (суббота) для этой даты
+        # weekday(): Monday=0, Sunday=6
+        days_from_sunday = (last_date.weekday() + 1) % 7
+        week_start = last_date - timedelta(days=days_from_sunday)  # Воскресенье
+        week_end = week_start + timedelta(days=6)  # Суббота
+        
+        # Формируем отчет за неделю
+        await generate_week_report(query.message, selected_club, week_start, week_end)
 
     elif data.startswith("report_club|"):
         # Выбор клуба для формирования отчета → предлагаем выбрать блок
