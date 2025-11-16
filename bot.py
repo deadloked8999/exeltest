@@ -2421,6 +2421,54 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             summary_lines.append("\n".join(msg_lines))
 
+        # Парсим и сохраняем «Прочие расходы» при загрузке файла
+        try:
+            logger.info(f"=== Parsing misc expenses on file upload for file_id={file_id} ===")
+            misc_expenses_text = excel_processor.extract_misc_expenses_from_notes_after_total(bytes(file_content))
+            parsed_expenses = []
+            if misc_expenses_text:
+                for line in misc_expenses_text.split('\n'):
+                    line = line.strip()
+                    if not line or line.lower().startswith('итого'):
+                        continue
+                    # Ищем все числа и пары "сумма-статья" в одной строке
+                    number_pattern = r'\d+(?:[.,]\d+)*'
+                    number_positions = []
+                    for match in re.finditer(number_pattern, line):
+                        start_pos = match.start()
+                        end_pos = match.end()
+                        number_str = match.group(0)
+                        number_positions.append((start_pos, end_pos, number_str))
+                    for i, (start_pos, end_pos, number_str) in enumerate(number_positions):
+                        after_number = line[end_pos:].lstrip()
+                        if not after_number.startswith('-'):
+                            continue
+                        dash_pos = end_pos + len(line[end_pos:]) - len(after_number)
+                        expense_end = len(line)
+                        # обрезаем по следующему числу с дефисом
+                        for j in range(i + 1, len(number_positions)):
+                            next_start, next_end, _ = number_positions[j]
+                            after_next = line[next_end:].lstrip()
+                            if after_next.startswith('-'):
+                                expense_end = next_start
+                                break
+                        expense_item = line[dash_pos + 1:expense_end].strip()
+                        amount_clean = number_str.replace('.', '').replace(',', '').replace(' ', '')
+                        try:
+                            amount = Decimal(amount_clean)
+                            parsed_expenses.append({
+                                'expense_item': expense_item,
+                                'amount': amount,
+                                'is_total': False
+                            })
+                        except (ValueError, InvalidOperation):
+                            continue
+            if parsed_expenses:
+                db.save_misc_expenses_records(file_id, parsed_expenses)
+                logger.info(f"Saved {len(parsed_expenses)} misc expense items for file_id={file_id}")
+        except Exception as e:
+            logger.error(f"Error parsing misc expenses on upload for file_id={file_id}: {e}", exc_info=True)
+
         # Парсим и сохраняем данные по такси при загрузке файла
         logger.info(f"=== Parsing taxi expenses on file upload for file_id={file_id} ===")
         taxi_data = excel_processor.extract_taxi_expenses(bytes(file_content))
